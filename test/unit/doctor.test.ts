@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { doctorCommand } from '../../src/ops/doctor-cmd.js';
 import { collectDoctor, formatDoctor } from '../../src/ops/doctor.js';
 import { resolvePaths } from '../../src/paths.js';
+import { DEFAULT_POLICY } from '../../src/policy/schema.js';
 import { createRunner } from '../../src/wacli/runner.js';
 import { FAKE_WACLI, FIXTURES, fakeEnv, makeTmp, removeTmp } from '../helpers/fake.js';
 
@@ -101,5 +102,18 @@ describe('doctor with a corrupt policy', () => {
       process.exitCode = before;
     }
     await expect(stat(paths.dataDir)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('doctor with an inert allowlist entry', () => {
+  it('names the policy remove command in the hint', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    await mkdir(paths.configDir, { recursive: true });
+    await writeFile(paths.policyFile, JSON.stringify({ ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: ['Alice "A" $x', '+61 400 000 001'] } }));
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date() });
+    expect(r.problems).toEqual([
+      'Allowlist entry "Alice "A" $x" is not a phone number or JID and never matches. Remove it with: whatsapp-agent policy remove "Alice \\"A\\" \\$x", then add the person with: whatsapp-agent policy allow <number or JID>',
+    ]);
   });
 });

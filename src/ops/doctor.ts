@@ -47,7 +47,10 @@ export async function collectDoctor(opts: { runner: Runner; policyFile: string; 
     problems.push(message.includes(opts.policyFile) ? message : `${opts.policyFile}: ${message}`);
   }
   for (const entry of policy?.writes.allow ?? []) {
-    if (isInertEntry(entry)) problems.push(`Allowlist entry "${entry}" is not a phone number or JID and never matches. Replace it with: whatsapp-agent policy allow <number or JID>`);
+    if (isInertEntry(entry)) {
+      const quoted = entry.replace(/(["\\$`])/g, '\\$1');
+      problems.push(`Allowlist entry "${entry}" is not a phone number or JID and never matches. Remove it with: whatsapp-agent policy remove "${quoted}", then add the person with: whatsapp-agent policy allow <number or JID>`);
+    }
   }
   const service = opts.service ? await opts.service.status() : null;
   if (service && !service.installed) {

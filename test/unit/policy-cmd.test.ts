@@ -1,10 +1,12 @@
 import { mkdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { addFileRoot, allowRecipient, disableWrites, enableWrites, formatPolicy, isInertEntry, removeRecipient, setConfirm, setGroups } from '../../src/ops/policy-cmd.js';
+import { AgentError } from '../../src/errors.js';
+import { addFileRoot, allowRecipient, disableWrites, enableWrites, formatPolicy, isInertEntry, policyCommand, removeRecipient, setConfirm, setGroups, type PolicyCommandDeps } from '../../src/ops/policy-cmd.js';
 import { DEFAULT_POLICY, loadPolicy, savePolicy } from '../../src/policy/schema.js';
-import type { Resolver } from '../../src/wacli/resolve.js';
-import { makeTmp, removeTmp } from '../helpers/fake.js';
+import { createResolver, type Resolver } from '../../src/wacli/resolve.js';
+import { createRunner } from '../../src/wacli/runner.js';
+import { FAKE_WACLI, fakeEnv, makeTmp, removeTmp } from '../helpers/fake.js';
 
 let tmp: string;
 let file: string;
@@ -64,5 +66,108 @@ describe('policy edits', () => {
     expect(isInertEntry('+61 400 000 001')).toBe(false);
     expect(isInertEntry('61400000001@S.WHATSAPP.NET')).toBe(false);
     expect(isInertEntry('0400 000 001')).toBe(true);
+  });
+});
+
+describe('policy remove resolves names like allow', () => {
+  /** A resolver over the fake wacli: Alice is a user chat, Family a group, and "a" matches both. */
+  const fakeResolver = (): Resolver => createResolver(createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv() }));
+  const mustNotResolve: Resolver = { resolve: async () => { throw new Error('the resolver must not be consulted'); } };
+  const allowOf = async () => (await loadPolicy(file)).writes.allow;
+  const seed = (allow: string[]) => savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow } });
+
+  it('removes a name by looking it up the way allow does', async () => {
+    await allowRecipient(file, 'Alice', fakeResolver());
+    expect(await allowOf()).toEqual(['61400000001@s.whatsapp.net']);
+    await removeRecipient(file, 'alice', fakeResolver());
+    expect(await allowOf()).toEqual([]);
+  });
+
+  it('removes a phone entry by the name that resolves to the same person', async () => {
+    await seed(['+61 400 000 001', '+61 400 000 002']);
+    await removeRecipient(file, 'Alice', fakeResolver());
+    expect(await allowOf()).toEqual(['+61 400 000 002']);
+  });
+
+  it('removes an inert text entry by its exact text, without wacli and without asking the resolver', async () => {
+    await seed(['Alice', '61400000002@s.whatsapp.net']);
+    await removeRecipient(file, 'alice', mustNotResolve);
+    expect(await allowOf()).toEqual(['61400000002@s.whatsapp.net']);
+    await seed(['Alice']);
+    await removeRecipient(file, 'Alice');
+    expect(await allowOf()).toEqual([]);
+  });
+
+  it('does not look up a phone number or a JID', async () => {
+    await seed(['+61 400 000 001', '61400000002@s.whatsapp.net']);
+    await removeRecipient(file, '61400000001', mustNotResolve);
+    await removeRecipient(file, '61400000002:5@s.whatsapp.net', mustNotResolve);
+    expect(await allowOf()).toEqual([]);
+  });
+
+  it('falls back to the text-only result when the lookup fails, and says not_found only when nothing matched', async () => {
+    await seed(['61400000002@s.whatsapp.net']);
+    const noWacli: Resolver = { resolve: async () => { throw new AgentError('wacli_not_installed', 'wacli was not found'); } };
+    await expect(removeRecipient(file, 'Alice', noWacli)).rejects.toMatchObject({ code: 'not_found' });
+    const nobody: Resolver = { resolve: async () => { throw new AgentError('not_found', 'No chat or contact matches "Zed".') ; } };
+    await expect(removeRecipient(file, 'Zed', nobody)).rejects.toMatchObject({ code: 'not_found', message: '"Zed" is not on the allowlist.' });
+    await expect(removeRecipient(file, 'Alice', fakeResolver())).rejects.toMatchObject({ code: 'not_found' });
+    expect(await allowOf()).toEqual(['61400000002@s.whatsapp.net']);
+  });
+
+  it('lets an ambiguous name through so the command can list the candidates', async () => {
+    await seed(['61400000001@s.whatsapp.net']);
+    await expect(removeRecipient(file, 'a', fakeResolver())).rejects.toMatchObject({
+      code: 'ambiguous_recipient',
+      details: { candidates: [expect.objectContaining({ name: 'Family' }), expect.objectContaining({ name: 'Alice' })] },
+    });
+    expect(await allowOf()).toEqual(['61400000001@s.whatsapp.net']);
+  });
+});
+
+describe('policy command output for an ambiguous name', () => {
+  const deps = (): PolicyCommandDeps => ({ makeResolver: () => createResolver(createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv() })) });
+
+  async function run(args: string[]): Promise<{ out: string; err: string; exitCode: number | string | undefined }> {
+    let out = '';
+    let err = '';
+    const so = vi.spyOn(process.stdout, 'write').mockImplementation((c) => { out += String(c); return true; });
+    const se = vi.spyOn(process.stderr, 'write').mockImplementation((c) => { err += String(c); return true; });
+    const before = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await policyCommand(deps()).parseAsync(args, { from: 'user' });
+      return { out, err, exitCode: process.exitCode };
+    } finally {
+      so.mockRestore();
+      se.mockRestore();
+      process.exitCode = before;
+    }
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('WHATSAPP_AGENT_CONFIG_DIR', path.dirname(file));
+    vi.stubEnv('WHATSAPP_AGENT_WACLI_BIN', FAKE_WACLI); // never the real wacli, even where the resolver seam is not used
+  });
+
+  it('prints the candidates with their JIDs and exits 1, for allow and for remove, changing nothing', async () => {
+    await savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: ['61400000009@s.whatsapp.net'] } });
+    const expected = '"a" matches 2 chats or contacts. Pass the JID of the one you mean:\n  Family  120363000000000001@g.us\n  Alice  61400000001@s.whatsapp.net\n';
+    for (const verb of ['allow', 'remove']) {
+      const r = await run([verb, 'a']);
+      expect(r.err).toBe(expected);
+      expect(r.out).toBe('');
+      expect(r.exitCode).toBe(1);
+    }
+    expect((await loadPolicy(file)).writes.allow).toEqual(['61400000009@s.whatsapp.net']);
+  });
+
+  it('allows and removes a name end to end through the command', async () => {
+    let r = await run(['allow', 'Alice']);
+    expect(r.exitCode).toBeUndefined();
+    expect(r.out).toContain('allowlist: 61400000001@s.whatsapp.net');
+    r = await run(['remove', 'Alice']);
+    expect(r.exitCode).toBeUndefined();
+    expect(r.out).toContain('allowlist: (empty)');
   });
 });

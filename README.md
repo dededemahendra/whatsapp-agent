@@ -76,7 +76,7 @@ whatsapp-agent policy show
 whatsapp-agent policy enable              # turn write tools on
 whatsapp-agent policy set confirm always  # always | unlisted | never
 whatsapp-agent policy allow "+61 400 000 001"
-whatsapp-agent policy remove "+61 400 000 001"  # remove an allowlist entry
+whatsapp-agent policy remove "+61 400 000 001"  # remove an allowlist entry; a name is looked up the same way as for allow
 whatsapp-agent policy set groups on
 whatsapp-agent policy add-file-root ~/Outbox
 whatsapp-agent policy disable

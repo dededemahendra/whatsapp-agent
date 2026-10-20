@@ -8,6 +8,7 @@ import { sameAllowTarget } from '../policy/engine.js';
 import { loadPolicy, savePolicy, type ConfirmMode, type Policy } from '../policy/schema.js';
 import { canonicalJid, createResolver, digitsOf, JID_RE, looksLikePhone, type Resolver } from '../wacli/resolve.js';
 import { createRunner } from '../wacli/runner.js';
+import { stripControls } from './text.js';
 
 async function edit(file: string, fn: (p: Policy) => Policy): Promise<Policy> {
   const next = fn(await loadPolicy(file));
@@ -46,11 +47,29 @@ export async function allowRecipient(file: string, entry: string, resolver?: Res
     : { ...p, writes: { ...p.writes, allow: [...p.writes.allow, stored] } }));
 }
 
-export const removeRecipient = (file: string, entry: string) => edit(file, (p) => {
-  const kept = p.writes.allow.filter((a) => !sameAllowTarget(a, entry));
-  if (kept.length === p.writes.allow.length) throw new AgentError('not_found', `"${entry.trim()}" is not on the allowlist.`);
-  return { ...p, writes: { ...p.writes, allow: kept } };
-});
+/**
+ * Removes an allowlist entry. An exact match on the text comes first, which keeps inert legacy name entries removable.
+ * Failing that, a name (not a phone number or JID) is looked up the way allow does it and the entry for the person it
+ * names is removed. A failed lookup (no wacli, no such name) leaves the text-only result: not_found. An ambiguous name
+ * is passed on, so the command can list the candidates.
+ */
+export async function removeRecipient(file: string, entry: string, resolver?: Resolver): Promise<Policy> {
+  const e = entry.trim();
+  const isPhoneOrJid = JID_RE.test(e.toLowerCase()) || looksLikePhone(e);
+  let target = e;
+  if (resolver && !isPhoneOrJid && !(await loadPolicy(file)).writes.allow.some((a) => sameAllowTarget(a, e))) {
+    try {
+      target = canonicalJid((await resolver.resolve(e)).jid);
+    } catch (err) {
+      if (err instanceof AgentError && err.code === 'ambiguous_recipient') throw err;
+    }
+  }
+  return edit(file, (p) => {
+    const kept = p.writes.allow.filter((a) => !sameAllowTarget(a, target));
+    if (kept.length === p.writes.allow.length) throw new AgentError('not_found', `"${e}" is not on the allowlist.`);
+    return { ...p, writes: { ...p.writes, allow: kept } };
+  });
+}
 
 export const setConfirm = (file: string, mode: ConfirmMode) => edit(file, (p) => ({ ...p, writes: { ...p.writes, confirm: mode } }));
 export const setGroups = (file: string, on: boolean) => edit(file, (p) => ({ ...p, writes: { ...p.writes, groups: on } }));
@@ -81,19 +100,47 @@ export function formatPolicy(p: Policy): string {
   ].join('\n') + '\n';
 }
 
-export function policyCommand(): Command {
+export interface PolicyCommandDeps {
+  /** Builds the resolver that looks names up; tests pass one over the fake wacli. */
+  makeResolver?: (account: string | null) => Resolver;
+}
+
+const realResolver = (account: string | null): Resolver =>
+  createResolver(createRunner({ bin: process.env.WHATSAPP_AGENT_WACLI_BIN || 'wacli', account, baseEnv: process.env }));
+
+/** The person has to choose among several matches, so list them with their JIDs rather than crash. */
+export function formatAmbiguous(input: string, candidates: Array<{ jid: string; name: string | null }>): string {
+  const lines = [`"${stripControls(input)}" matches ${candidates.length} chats or contacts. Pass the JID of the one you mean:`];
+  for (const c of candidates) lines.push(`  ${c.name ? stripControls(c.name) : '(no name)'}  ${c.jid}`);
+  return lines.join('\n') + '\n';
+}
+
+export function policyCommand(deps: PolicyCommandDeps = {}): Command {
+  const makeResolver = deps.makeResolver ?? realResolver;
   const file = () => resolvePaths().policyFile;
   const out = (p: Policy): void => { process.stdout.write(formatPolicy(p)); };
+  /** Runs a name lookup; an ambiguous name prints its candidates on stderr and sets exit code 1 instead of throwing. */
+  const lookup = async (input: string, run: () => Promise<Policy>): Promise<void> => {
+    try {
+      out(await run());
+    } catch (e) {
+      if (!(e instanceof AgentError) || e.code !== 'ambiguous_recipient') throw e;
+      process.stderr.write(formatAmbiguous(input, (e.details.candidates ?? []) as Array<{ jid: string; name: string | null }>));
+      process.exitCode = 1;
+    }
+  };
   const cmd = new Command('policy').description('Show or change what the agent may send');
   cmd.command('show').description('Print the current policy').action(async () => out(await loadPolicy(file())));
   cmd.command('enable').description('Allow write tools (sends still follow confirm, allowlist and rate limit)').action(async () => out(await enableWrites(file())));
   cmd.command('disable').description('Turn all write tools off').action(async () => out(await disableWrites(file())));
   cmd.command('allow <recipient>').description('Add a phone number or JID to the allowlist; a name is looked up once and stored as its JID').action(async (r: string) => {
     const policy = await loadPolicy(file());
-    const resolver = createResolver(createRunner({ bin: process.env.WHATSAPP_AGENT_WACLI_BIN || 'wacli', account: policy.account, baseEnv: process.env }));
-    out(await allowRecipient(file(), r, resolver));
+    await lookup(r, () => allowRecipient(file(), r, makeResolver(policy.account)));
   });
-  cmd.command('remove <recipient>').description('Remove an allowlist entry').action(async (r: string) => out(await removeRecipient(file(), r)));
+  cmd.command('remove <recipient>').description('Remove an allowlist entry; a name is looked up the same way as for allow').action(async (r: string) => {
+    const policy = await loadPolicy(file());
+    await lookup(r, () => removeRecipient(file(), r, makeResolver(policy.account)));
+  });
   const set = cmd.command('set').description('Change a setting');
   set.command('confirm <mode>').description('always | unlisted | never').action(async (mode: string) => {
     if (mode !== 'always' && mode !== 'unlisted' && mode !== 'never') throw new AgentError('invalid_input', 'mode must be always, unlisted or never');
