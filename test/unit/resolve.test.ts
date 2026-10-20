@@ -329,3 +329,104 @@ describe('resolver pins', () => {
     }
   });
 });
+
+describe('exact resolution for writes', () => {
+  const chat = (jid: string, name: string, kind = 'dm') =>
+    ({ jid, kind, name, last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 });
+  const contact = (jid: string, name: string, alias = '', system_name = '') => ({ jid, phone: `+${jid.split('@')[0]}`, name, alias, system_name, updated_at: '2026-10-19T08:00:00Z' });
+  const envelope = (rows: unknown[]) => JSON.stringify({ success: true, data: rows, error: null });
+  const DAVE = '61400000011@s.whatsapp.net';
+  const PLUMBING = '61400000012@s.whatsapp.net';
+  const DAVID = '61400000013@s.whatsapp.net';
+  const NOT_EXACT = 'No chat or contact is named exactly "Dave". Use the exact name or the JID.';
+
+  async function withFixtures(files: Record<string, string>, fn: (r: ReturnType<typeof resolver>) => Promise<void>, extra: Record<string, string> = {}): Promise<void> {
+    const dir = await fixturesWith(files);
+    try {
+      await fn(resolver({ FAKE_WACLI_FIXTURES: dir, ...extra }));
+    } finally {
+      await removeTmp(dir);
+    }
+  }
+  const plumbingOnly = { 'chats_list.json': envelope([chat(PLUMBING, "Dave's Plumbing")]), 'contacts_search.json': envelope([contact(DAVID, 'David Smith')]) };
+
+  it('keeps the lone-partial rule for reads and refuses it for writes, offering the one candidate', async () => {
+    await withFixtures(plumbingOnly, async (r) => {
+      expect(await r.resolve('Dave')).toEqual({ jid: PLUMBING, name: "Dave's Plumbing", kind: 'user' });
+      expect(await r.resolve('Dave', { exact: false })).toEqual({ jid: PLUMBING, name: "Dave's Plumbing", kind: 'user' });
+      await expect(r.resolve('Dave', { exact: true })).rejects.toMatchObject({
+        code: 'ambiguous_recipient',
+        message: NOT_EXACT,
+        details: { candidates: [{ jid: PLUMBING, name: "Dave's Plumbing", kind: 'user' }] },
+      });
+    });
+  });
+
+  it('accepts an exact match whatever the case, spacing or Unicode form', async () => {
+    const decomposed = 'Café Dave';
+    await withFixtures({ 'chats_list.json': envelope([chat(PLUMBING, "Dave's Plumbing"), chat(DAVE, '  dAVE  '), chat(DAVID, decomposed)]) }, async (r) => {
+      expect(await r.resolve('Dave', { exact: true })).toMatchObject({ jid: DAVE });
+      expect(await r.resolve('  dave ', { exact: true })).toMatchObject({ jid: DAVE });
+      expect(await r.resolve('Café Dave', { exact: true })).toMatchObject({ jid: DAVID });
+    });
+  });
+
+  it('accepts an exact alias or system name, and names the field on a lone partial', async () => {
+    await withFixtures({ 'contacts_search.json': envelope([contact(DAVE, 'Robert Smith', 'Dave', '')]) }, async (r) => {
+      expect(await r.resolve('Dave', { exact: true })).toEqual({ jid: DAVE, name: 'Robert Smith', kind: 'user' });
+    }, { FAKE_WACLI_EMPTY: 'chats list' });
+    await withFixtures({ 'contacts_search.json': envelope([contact(DAVE, 'Robert Smith', '', 'Dave')]) }, async (r) => {
+      expect(await r.resolve('dave', { exact: true })).toEqual({ jid: DAVE, name: 'Robert Smith', kind: 'user' });
+    }, { FAKE_WACLI_EMPTY: 'chats list' });
+    await withFixtures({ 'contacts_search.json': envelope([contact(DAVE, 'Robert Smith', 'Davey', '')]) }, async (r) => {
+      await expect(r.resolve('Dave', { exact: true })).rejects.toMatchObject({
+        code: 'ambiguous_recipient',
+        message: NOT_EXACT,
+        details: { candidates: [{ jid: DAVE, name: 'Robert Smith', kind: 'user', matched_on: 'alias' }] },
+      });
+      expect(await r.resolve('Dave')).toMatchObject({ jid: DAVE });
+    }, { FAKE_WACLI_EMPTY: 'chats list' });
+  });
+
+  it('prefers an exact contact over a lone partial chat', async () => {
+    await withFixtures({ 'chats_list.json': envelope([chat(PLUMBING, "Dave's Plumbing")]), 'contacts_search.json': envelope([contact(DAVE, 'Dave')]) }, async (r) => {
+      expect(await r.resolve('Dave', { exact: true })).toEqual({ jid: DAVE, name: 'Dave', kind: 'user' });
+      expect(await r.resolve('Dave')).toEqual({ jid: PLUMBING, name: "Dave's Plumbing", kind: 'user' });
+    });
+  });
+
+  it('offers a lone partial chat and a lone partial contact together, without repeating one person', async () => {
+    await withFixtures({ 'chats_list.json': envelope([chat(PLUMBING, "Dave's Plumbing")]), 'contacts_search.json': envelope([contact(DAVID, 'Davey Jones')]) }, async (r) => {
+      await expect(r.resolve('Dave', { exact: true })).rejects.toMatchObject({
+        code: 'ambiguous_recipient',
+        message: NOT_EXACT,
+        details: { candidates: [expect.objectContaining({ jid: PLUMBING }), expect.objectContaining({ jid: DAVID })] },
+      });
+    });
+    await withFixtures({ 'chats_list.json': envelope([chat(PLUMBING, "Dave's Plumbing")]), 'contacts_search.json': envelope([contact(PLUMBING, "Dave's Plumbing")]) }, async (r) => {
+      await expect(r.resolve('Dave', { exact: true })).rejects.toMatchObject({ details: { candidates: [expect.objectContaining({ jid: PLUMBING })] } });
+    });
+  });
+
+  it('still reports several partial matches as an ordinary ambiguity, and nothing as not_found', async () => {
+    await withFixtures({ 'chats_list.json': envelope([chat(PLUMBING, "Dave's Plumbing"), chat(DAVID, 'Davey')]) }, async (r) => {
+      await expect(r.resolve('Dave', { exact: true })).rejects.toMatchObject({ code: 'ambiguous_recipient', message: expect.stringContaining('"Dave" matches 2 chats or contacts') });
+    });
+    await expect(resolver({ FAKE_WACLI_EMPTY: 'chats list,contacts search' }).resolve('Dave', { exact: true })).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('leaves phone numbers and JIDs exactly as they are', async () => {
+    const r = resolver();
+    expect(await r.resolve('+61 400 000 001', { exact: true })).toEqual(await r.resolve('+61 400 000 001'));
+    expect(await r.resolve('61400000001@s.whatsapp.net', { exact: true })).toEqual({ jid: '61400000001@s.whatsapp.net', name: 'Alice', kind: 'user' });
+    await expect(r.resolve('0400 000 001', { exact: true })).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  it('pickUnique takes the same option', () => {
+    const only = { jid: 'a@s.whatsapp.net', name: "Dave's Plumbing", kind: 'user' as const };
+    expect(pickUnique([only], 'dave')).toEqual({ kind: 'one', value: only });
+    expect(pickUnique([only], 'dave', { exact: true })).toEqual({ kind: 'partial', candidate: only });
+    expect(pickUnique([only], 'zzz', { exact: true })).toEqual({ kind: 'none' });
+    expect(pickUnique([only], "dave's plumbing", { exact: true })).toEqual({ kind: 'one', value: only });
+  });
+});

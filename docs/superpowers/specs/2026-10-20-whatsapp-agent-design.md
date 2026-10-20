@@ -696,6 +696,10 @@ overrides the earlier text where they differ.
 - A22. Name lookups request 50 rows from both `chats list --query` and
   `contacts search`, so an exact match is not missed behind partial ones; the
   `ambiguous_recipient` payload still carries at most 10 candidates.
+- A23. Write tools resolve names exactly: a name is accepted only on an exact
+  case-insensitive, trimmed, NFC-normalised match on a chat name or a contact's
+  name, alias or system name, and a lone partial match is `ambiguous_recipient`
+  with that candidate. Read tools keep the lone-partial rule of A15.
 - A25. The daemon logs the sanitised message of an `error` event and of a wacli
   failure envelope (controls stripped, JIDs and runs of 8 or more digits
   replaced, 200 characters at most); other recognised events stay name-only.
