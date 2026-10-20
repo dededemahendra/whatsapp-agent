@@ -129,6 +129,7 @@ Run `whatsapp-agent doctor`. It prints wacli's version, pairing state, the daemo
 Common cases:
 
 - Not paired, or the session was revoked: run `whatsapp-agent setup` and scan the QR code again.
+- After re-pairing, restart the daemon with `whatsapp-agent daemon install`.
 - The sync daemon is not installed: `npm i -g whatsapp-agent` then `whatsapp-agent daemon install`.
 - Reads look stale: `whatsapp-agent daemon status`, then `daemon logs`.
 - `confirmation_unavailable`: your host cannot show a confirmation form. Allowlist the recipient and set `confirm unlisted`.

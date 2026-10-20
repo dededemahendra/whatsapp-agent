@@ -66,6 +66,15 @@ async function checkPaired(runner: Runner, io: SetupIO): Promise<Paired> {
   }
 }
 
+/** True when a service from an earlier setup is installed. A status that cannot be read counts as not installed. */
+async function serviceInstalled(service: ServiceManager): Promise<boolean> {
+  try {
+    return (await service.status()).installed;
+  } catch {
+    return false;
+  }
+}
+
 export async function runSetup(o: SetupOptions): Promise<boolean> {
   const { io } = o;
 
@@ -137,6 +146,16 @@ export async function runSetup(o: SetupOptions): Promise<boolean> {
     io.print('Background sync: no service support on this platform. Run `whatsapp-agent daemon run` under your own supervisor so reads stay fresh.');
   } else if (!o.isGlobal) {
     io.print('Background sync: install the package globally so the daemon has a stable path, then install the service:\n  npm i -g whatsapp-agent\n  whatsapp-agent daemon install');
+  } else if (o.flags.service !== false && await serviceInstalled(o.service)) {
+    // A service installed earlier stops for good once the session is revoked; installing it again restarts it.
+    try {
+      await o.service.install();
+      io.print('Restarted the sync daemon service.');
+    } catch (e) {
+      io.print(`Could not restart the service: ${e instanceof Error ? e.message : String(e)}`);
+      io.print('Restart it later with: whatsapp-agent daemon install');
+      ready = false;
+    }
   } else {
     const wantService = o.flags.service ?? (await io.ask('Install the sync daemon as a login service? Without it reads go stale and each send opens a fresh session.'));
     if (wantService) {

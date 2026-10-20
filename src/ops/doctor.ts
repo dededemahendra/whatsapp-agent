@@ -56,7 +56,7 @@ export async function collectDoctor(opts: { runner: Runner; policyFile: string; 
   if (service && !service.installed) {
     problems.push('The sync daemon is not installed. Reads will go stale. Run: whatsapp-agent daemon install');
   } else if (service && service.running === false) {
-    problems.push('The sync daemon is installed but not running. Check: whatsapp-agent daemon logs');
+    problems.push('The sync daemon is installed but not running. Restart it with: whatsapp-agent daemon install');
   }
   return {
     status,

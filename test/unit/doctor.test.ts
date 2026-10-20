@@ -117,3 +117,13 @@ describe('doctor with an inert allowlist entry', () => {
     ]);
   });
 });
+
+describe('doctor with a service that is installed but stopped', () => {
+  it('tells the person to restart it with daemon install', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+    const service = { install: async () => '', uninstall: async () => {}, status: async () => ({ installed: true, running: false, detail: 'installed, inactive' }) };
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service, now: () => new Date() });
+    expect(r.problems).toEqual(['The sync daemon is installed but not running. Restart it with: whatsapp-agent daemon install']);
+  });
+});

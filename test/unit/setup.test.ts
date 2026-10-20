@@ -349,6 +349,68 @@ describe('runSetup finding and installing wacli', () => {
   });
 });
 
+describe('runSetup restarts a service that is already installed', () => {
+  const installedService = (calls: string[]) => ({ ...service(calls), status: async () => ({ installed: true, running: false, detail: 'installed, inactive' }) });
+
+  it('installs again without asking, which restarts it, and says so', async () => {
+    const calls: string[] = [];
+    const t = io({ answers: [true] });
+    expect(await runSetup({ io: t.io, ...opts(), service: installedService(calls), isGlobal: true, flags: {} })).toBe(true);
+    expect(calls).toEqual(['install']);
+    expect(t.asked).toEqual([]);
+    const text = t.out.join('\n');
+    expect(text).toContain('Restarted the sync daemon service.');
+    expect(text).not.toContain('Installed the sync daemon service');
+    expect(text).not.toContain('Skipped the service');
+  });
+
+  it('does the same when --service is given, and leaves an installed service alone for --no-service', async () => {
+    const calls: string[] = [];
+    const t = io({});
+    await runSetup({ io: t.io, ...opts(), service: installedService(calls), isGlobal: true, flags: { service: true } });
+    expect(calls).toEqual(['install']);
+    expect(t.out.join('\n')).toContain('Restarted the sync daemon service.');
+
+    const skipped: string[] = [];
+    const t2 = io({});
+    expect(await runSetup({ io: t2.io, ...opts(), service: installedService(skipped), isGlobal: true, flags: { service: false } })).toBe(true);
+    expect(skipped).toEqual([]);
+    expect(t2.out.join('\n')).toContain('Skipped the service');
+  });
+
+  it('does not touch an installed service from a copy that is not a global install', async () => {
+    const calls: string[] = [];
+    const t = io({});
+    await runSetup({ io: t.io, ...opts(), service: installedService(calls), isGlobal: false, flags: {} });
+    expect(calls).toEqual([]);
+    expect(t.out.join('\n')).toContain('npm i -g whatsapp-agent');
+  });
+
+  it('still offers the service when none is installed, and when its status cannot be read', async () => {
+    const calls: string[] = [];
+    const t = io({ answers: [true] });
+    await runSetup({ io: t.io, ...opts(), service: service(calls), isGlobal: true, flags: {} });
+    expect(t.asked).toHaveLength(1);
+    expect(calls).toEqual(['install']);
+    expect(t.out.join('\n')).toContain('Installed the sync daemon service at /svc');
+
+    const unreadable = { ...service([]), status: async () => { throw new Error('launchctl is not answering'); } };
+    const t2 = io({ answers: [false] });
+    await runSetup({ io: t2.io, ...opts(), service: unreadable, isGlobal: true, flags: {} });
+    expect(t2.asked).toHaveLength(1);
+  });
+
+  it('reports a failed restart, still prints the rest, and returns false', async () => {
+    const failing = { ...installedService([]), install: async (): Promise<string> => { throw new Error('systemctl restart failed (1)'); } };
+    const t = io({});
+    expect(await runSetup({ io: t.io, ...opts(), service: failing, isGlobal: true, flags: {} })).toBe(false);
+    const text = t.out.join('\n');
+    expect(text).toContain('Could not restart the service: systemctl restart failed (1)');
+    expect(text).toContain('Restart it later with: whatsapp-agent daemon install');
+    expect(text).toContain(BAN_NOTICE);
+  });
+});
+
 describe('runSetup service step', () => {
   it('does not offer the service for a non-global install, even when the person would say yes', async () => {
     const calls: string[] = [];
