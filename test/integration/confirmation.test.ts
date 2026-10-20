@@ -1,9 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { appendFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { createRequestStateCodec } from '@modelcontextprotocol/server';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fileState, textState, type ConfirmState } from '../../src/mcp/confirm.js';
+import { createServer } from '../../src/mcp/server.js';
 import type { Policy } from '../../src/policy/schema.js';
 import type { Resolver } from '../../src/wacli/resolve.js';
 import { fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
@@ -206,6 +209,68 @@ describe('a confirmation round over the 2026-07-28 era', () => {
     h = await makeHarness({ policy: enabled(), elicitation: 'none' });
     expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('confirmation_unavailable');
     expect(await sends()).toHaveLength(0);
+  });
+});
+
+describe('a confirmation round over the 2025 era', () => {
+  /** The same server code the CLI runs, served through serveStdio over an in-memory pair, with a client that connects the 2025 way. */
+  async function legacyClient(answer: () => { action: 'accept'; content: { confirm: boolean } } | { action: 'decline' }): Promise<{ client: Client; stop: () => Promise<void> }> {
+    const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+    const handle = serveStdio(() => createServer(h.deps), { legacy: 'serve', transport: serverSide });
+    const client = new Client({ name: 'legacy', version: '0.0.0' }, { capabilities: { elicitation: { form: {} } }, versionNegotiation: { mode: 'legacy' } });
+    client.setRequestHandler('elicitation/create', async () => answer());
+    await client.connect(clientSide);
+    return { client, stop: async () => { await client.close(); await handle.close(); } };
+  }
+
+  it('sends once after an honest accept, with the same state check as the 2026 era', async () => {
+    h = await makeHarness({ policy: enabled() });
+    const { client, stop } = await legacyClient(() => ({ action: 'accept', content: { confirm: true } }));
+    try {
+      const r = await client.callTool({ name: 'send_text', arguments: { to: 'Alice', message: 'hello' } });
+      expect(r.isError).toBeFalsy();
+      expect(client.getServerVersion()).toBeDefined();
+      expect(await sends()).toHaveLength(1);
+    } finally {
+      await stop();
+    }
+  });
+
+  it('refuses an answer that comes after the state has expired, and sends nothing', async () => {
+    h = await makeHarness({ policy: enabled() });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { client, stop } = await legacyClient(() => {
+      vi.setSystemTime(Date.now() + 301_000);
+      return { action: 'accept', content: { confirm: true } };
+    });
+    try {
+      await expect(client.callTool({ name: 'send_text', arguments: { to: 'Alice', message: 'hello' } })).rejects.toMatchObject({ message: expect.stringContaining('requestState') });
+      expect(await sends()).toHaveLength(0);
+      expect(h.audits).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      await stop();
+    }
+  });
+
+  it('does not take a _meta claim as a capability the client never declared', async () => {
+    h = await makeHarness({ policy: enabled(), elicitation: 'none' });
+    const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+    const handle = serveStdio(() => createServer(h.deps), { legacy: 'serve', transport: serverSide });
+    const client = new Client({ name: 'legacy', version: '0.0.0' }, { versionNegotiation: { mode: 'legacy' } });
+    await client.connect(clientSide);
+    try {
+      const r = await client.callTool({
+        name: 'send_text',
+        arguments: { to: 'Alice', message: 'hello' },
+        _meta: { 'io.modelcontextprotocol/clientCapabilities': { elicitation: { form: {} } } },
+      });
+      expect(errorOf(r as never).error).toBe('confirmation_unavailable');
+      expect(await sends()).toHaveLength(0);
+    } finally {
+      await client.close();
+      await handle.close();
+    }
   });
 });
 
