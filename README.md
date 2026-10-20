@@ -93,6 +93,10 @@ whatsapp-agent policy disable
 
 Changes take effect on the next tool call; no restart needed. The exceptions are the limits, account and daemon blocks of policy.json, which are read at start: restart the MCP server (reconnect your host), and for the daemon run `whatsapp-agent daemon install` again, which restarts the service.
 
+The commands that widen what the agent may send (`enable`, `set confirm unlisted` and `never`, `set groups on`, `allow` and `add-file-root`) refuse to run unless stdin is a terminal. `show`, `disable`, `set confirm always`, `set groups off` and `remove` run anywhere.
+
+The controls assume the agent cannot run commands as your user. An agent with a shell as the same user could change the policy or call wacli itself, so keep the policy commands for yourself, and run such agents under a different user if you need a hard boundary.
+
 ## Audit
 
 ```

@@ -26,6 +26,7 @@ Write tools (`send_text`, `send_file`, `react`, `mark_read`) follow the person's
 - Sends are rate limited. `rate_limited` includes `retry_after_seconds`; wait that long or stop.
 - Never send bulk, unsolicited or marketing messages. Never send the same text to many people.
 - After a `timeout` on a send, read the chat before retrying: the message may have gone through.
+- Never run `whatsapp-agent policy` commands, edit `policy.json`, `rate-limit.json` or `audit.jsonl`, or call `wacli` directly. Those are the person's controls. If a send is refused, tell them and let them decide.
 
 ## Good habits
 

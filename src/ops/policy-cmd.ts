@@ -103,7 +103,11 @@ export function formatPolicy(p: Policy): string {
 export interface PolicyCommandDeps {
   /** Builds the resolver that looks names up; tests pass one over the fake wacli. */
   makeResolver?: (account: string | null) => Resolver;
+  /** Whether stdin is a terminal. Tests inject it; the default asks process.stdin. */
+  isTTY?: () => boolean;
 }
+
+const NEEDS_TERMINAL = 'This command changes what the agent may send and must be run from an interactive terminal.';
 
 const realResolver = (account: string | null): Resolver =>
   createResolver(createRunner({ bin: process.env.WHATSAPP_AGENT_WACLI_BIN || 'wacli', account, baseEnv: process.env }));
@@ -117,7 +121,15 @@ export function formatAmbiguous(input: string, candidates: Array<{ jid: string; 
 
 export function policyCommand(deps: PolicyCommandDeps = {}): Command {
   const makeResolver = deps.makeResolver ?? realResolver;
+  const isTTY = deps.isTTY ?? ((): boolean => Boolean(process.stdin.isTTY));
   const file = () => resolvePaths().policyFile;
+  /** Commands that widen what the agent may send have to be typed by the person: a script or an agent's shell has no terminal. */
+  const refusedWithoutTerminal = (): boolean => {
+    if (isTTY()) return false;
+    process.stderr.write(`${NEEDS_TERMINAL}\n`);
+    process.exitCode = 1;
+    return true;
+  };
   const out = (p: Policy): void => { process.stdout.write(formatPolicy(p)); };
   /** Runs a name lookup; an ambiguous name prints its candidates on stderr and sets exit code 1 instead of throwing. */
   const lookup = async (input: string, run: () => Promise<Policy>): Promise<void> => {
@@ -131,9 +143,13 @@ export function policyCommand(deps: PolicyCommandDeps = {}): Command {
   };
   const cmd = new Command('policy').description('Show or change what the agent may send');
   cmd.command('show').description('Print the current policy').action(async () => out(await loadPolicy(file())));
-  cmd.command('enable').description('Allow write tools (sends still follow confirm, allowlist and rate limit)').action(async () => out(await enableWrites(file())));
+  cmd.command('enable').description('Allow write tools (sends still follow confirm, allowlist and rate limit); needs a terminal').action(async () => {
+    if (refusedWithoutTerminal()) return;
+    out(await enableWrites(file()));
+  });
   cmd.command('disable').description('Turn all write tools off').action(async () => out(await disableWrites(file())));
-  cmd.command('allow <recipient>').description('Add a phone number or JID to the allowlist; a name is looked up once and stored as its JID').action(async (r: string) => {
+  cmd.command('allow <recipient>').description('Add a phone number or JID to the allowlist; a name is looked up once and stored as its JID; needs a terminal').action(async (r: string) => {
+    if (refusedWithoutTerminal()) return;
     const policy = await loadPolicy(file());
     await lookup(r, () => allowRecipient(file(), r, makeResolver(policy.account)));
   });
@@ -142,14 +158,19 @@ export function policyCommand(deps: PolicyCommandDeps = {}): Command {
     await lookup(r, () => removeRecipient(file(), r, makeResolver(policy.account)));
   });
   const set = cmd.command('set').description('Change a setting');
-  set.command('confirm <mode>').description('always | unlisted | never').action(async (mode: string) => {
+  set.command('confirm <mode>').description('always | unlisted | never (unlisted and never need a terminal)').action(async (mode: string) => {
     if (mode !== 'always' && mode !== 'unlisted' && mode !== 'never') throw new AgentError('invalid_input', 'mode must be always, unlisted or never');
+    if (mode !== 'always' && refusedWithoutTerminal()) return;
     out(await setConfirm(file(), mode));
   });
-  set.command('groups <on|off>').description('Allow sends to groups').action(async (v: string) => {
+  set.command('groups <on|off>').description('Allow sends to groups (on needs a terminal)').action(async (v: string) => {
     if (v !== 'on' && v !== 'off') throw new AgentError('invalid_input', 'value must be on or off');
+    if (v === 'on' && refusedWithoutTerminal()) return;
     out(await setGroups(file(), v === 'on'));
   });
-  cmd.command('add-file-root <dir>').description('Allow send_file to read files under this directory').action(async (dir: string) => out(await addFileRoot(file(), dir)));
+  cmd.command('add-file-root <dir>').description('Allow send_file to read files under this directory; needs a terminal').action(async (dir: string) => {
+    if (refusedWithoutTerminal()) return;
+    out(await addFileRoot(file(), dir));
+  });
   return cmd;
 }

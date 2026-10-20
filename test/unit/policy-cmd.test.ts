@@ -1,4 +1,4 @@
-import { mkdir, realpath } from 'node:fs/promises';
+import { mkdir, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentError } from '../../src/errors.js';
@@ -125,30 +125,35 @@ describe('policy remove resolves names like allow', () => {
   });
 });
 
-describe('policy command output for an ambiguous name', () => {
-  const deps = (): PolicyCommandDeps => ({ makeResolver: () => createResolver(createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv() })) });
-
-  async function run(args: string[]): Promise<{ out: string; err: string; exitCode: number | string | undefined }> {
-    let out = '';
-    let err = '';
-    const so = vi.spyOn(process.stdout, 'write').mockImplementation((c) => { out += String(c); return true; });
-    const se = vi.spyOn(process.stderr, 'write').mockImplementation((c) => { err += String(c); return true; });
-    const before = process.exitCode;
-    process.exitCode = undefined;
-    try {
-      await policyCommand(deps()).parseAsync(args, { from: 'user' });
-      return { out, err, exitCode: process.exitCode };
-    } finally {
-      so.mockRestore();
-      se.mockRestore();
-      process.exitCode = before;
-    }
+/** Runs `whatsapp-agent policy <args>` in this process and returns what it printed and its exit code. */
+async function runPolicy(args: string[], deps: PolicyCommandDeps): Promise<{ out: string; err: string; exitCode: number | string | undefined }> {
+  let out = '';
+  let err = '';
+  const so = vi.spyOn(process.stdout, 'write').mockImplementation((c) => { out += String(c); return true; });
+  const se = vi.spyOn(process.stderr, 'write').mockImplementation((c) => { err += String(c); return true; });
+  const before = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await policyCommand(deps).parseAsync(args, { from: 'user' });
+    return { out, err, exitCode: process.exitCode };
+  } finally {
+    so.mockRestore();
+    se.mockRestore();
+    process.exitCode = before;
   }
+}
 
-  beforeEach(() => {
-    vi.stubEnv('WHATSAPP_AGENT_CONFIG_DIR', path.dirname(file));
-    vi.stubEnv('WHATSAPP_AGENT_WACLI_BIN', FAKE_WACLI); // never the real wacli, even where the resolver seam is not used
-  });
+/** Points the command at the temp policy file and, whatever a test forgets, at the fake wacli rather than the real one. */
+function useTempPolicy(): void {
+  vi.stubEnv('WHATSAPP_AGENT_CONFIG_DIR', path.dirname(file));
+  vi.stubEnv('WHATSAPP_AGENT_WACLI_BIN', FAKE_WACLI);
+}
+
+describe('policy command output for an ambiguous name', () => {
+  const deps = (): PolicyCommandDeps => ({ isTTY: () => true, makeResolver: () => createResolver(createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv() })) });
+  const run = (args: string[]) => runPolicy(args, deps());
+
+  beforeEach(useTempPolicy);
 
   it('prints the candidates with their JIDs and exits 1, for allow and for remove, changing nothing', async () => {
     await savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: ['61400000009@s.whatsapp.net'] } });
@@ -169,5 +174,69 @@ describe('policy command output for an ambiguous name', () => {
     r = await run(['remove', 'Alice']);
     expect(r.exitCode).toBeUndefined();
     expect(r.out).toContain('allowlist: (empty)');
+  });
+});
+
+describe('policy commands that widen what the agent may send need a terminal', () => {
+  const REFUSAL = 'This command changes what the agent may send and must be run from an interactive terminal.\n';
+  const noTerminal: PolicyCommandDeps = { isTTY: () => false };
+  const terminal: PolicyCommandDeps = { isTTY: () => true };
+  let outbox: string;
+
+  beforeEach(async () => {
+    useTempPolicy();
+    outbox = path.join(tmp, 'outbox');
+    await mkdir(outbox);
+    await savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, enabled: true, confirm: 'unlisted', groups: true, allow: ['61400000009@s.whatsapp.net'] } });
+  });
+
+  const widening = (): string[][] => [['enable'], ['set', 'confirm', 'unlisted'], ['set', 'confirm', 'never'], ['set', 'groups', 'on'], ['allow', '+61 400 000 001'], ['add-file-root', outbox]];
+
+  it('refuses each of them when stdin is not a terminal: it says why, exits 1 and changes nothing', async () => {
+    await savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, enabled: false, confirm: 'always', groups: false } });
+    const before = await readFile(file, 'utf8');
+    for (const args of widening()) {
+      const r = await runPolicy(args, noTerminal);
+      expect({ args, err: r.err, out: r.out, exitCode: r.exitCode }).toEqual({ args, err: REFUSAL, out: '', exitCode: 1 });
+    }
+    expect(await readFile(file, 'utf8')).toBe(before);
+  });
+
+  it('runs each of them from a terminal', async () => {
+    await savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, enabled: false, confirm: 'always', groups: false } });
+    for (const args of widening()) {
+      const r = await runPolicy(args, terminal);
+      expect({ args, err: r.err, exitCode: r.exitCode }).toEqual({ args, err: '', exitCode: undefined });
+    }
+    const p = await loadPolicy(file);
+    expect(p.writes).toMatchObject({ enabled: true, confirm: 'never', groups: true, allow: ['+61 400 000 001'] });
+    expect(p.writes.fileRoots).toEqual([await realpath(outbox)]);
+  });
+
+  it('leaves the commands that narrow or only read unrestricted', async () => {
+    const free: string[][] = [['show'], ['set', 'confirm', 'always'], ['set', 'groups', 'off'], ['remove', '61400000009@s.whatsapp.net'], ['disable']];
+    for (const args of free) {
+      const r = await runPolicy(args, noTerminal);
+      expect({ args, err: r.err, exitCode: r.exitCode }).toEqual({ args, err: '', exitCode: undefined });
+    }
+    const p = await loadPolicy(file);
+    expect(p.writes).toMatchObject({ enabled: false, confirm: 'always', groups: false, allow: [] });
+  });
+
+  it('still reports a bad value as a bad value before it asks for a terminal', async () => {
+    await expect(runPolicy(['set', 'confirm', 'sometimes'], noTerminal)).rejects.toMatchObject({ code: 'invalid_input' });
+    await expect(runPolicy(['set', 'groups', 'maybe'], noTerminal)).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  it('asks the real process.stdin when no seam is given', async () => {
+    const before = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    try {
+      const r = await runPolicy(['enable'], {});
+      expect(r.err).toBe(REFUSAL);
+      expect(r.exitCode).toBe(1);
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: before, configurable: true });
+    }
   });
 });
