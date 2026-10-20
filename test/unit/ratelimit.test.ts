@@ -258,3 +258,43 @@ describe('rate limiter when the lock cannot be created', () => {
     expect(err.message).toContain('has been held for more than');
   });
 });
+
+describe('rate limiter when a stale lock cannot be cleared or the state cannot be written', () => {
+  const both = (rl: ReturnType<typeof createRateLimiter>) => [() => rl.snapshot(t0), () => rl.record(t0)];
+
+  // A lock older than the stale limit that is a folder: unlink cannot remove it (EPERM or EISDIR), so breaking it never works.
+  it('stops with invalid_input, well inside the wait budget, when a stale lock cannot be removed', async () => {
+    const file = path.join(tmp, 'rl.json');
+    const lock = `${file}.lock`;
+    await mkdir(lock);
+    const old = new Date(Date.now() - 31_000);
+    await utimes(lock, old, old);
+    try {
+      for (const op of both(createRateLimiter(file))) {
+        const started = Date.now();
+        const err = await within(op().catch((e: unknown) => e), 2000, 'the operation over a stale lock that cannot be removed') as AgentError;
+        expect(err).toMatchObject({ name: 'AgentError', code: 'invalid_input' });
+        expect(err.message.startsWith(`Could not clear a stale rate-limit lock at ${lock}: `)).toBe(true);
+        expect(err.message).toMatch(/EPERM|EISDIR/);
+        expect(Date.now() - started).toBeLessThan(1000);
+      }
+      expect(await readdir(tmp)).toEqual(['rl.json.lock']);
+    } finally {
+      // Takes the lock away so that a loop that never ended (the old behaviour) can finish instead of spinning into the next test.
+      await rm(lock, { recursive: true, force: true });
+    }
+  });
+
+  // The state file's own name and its lock's both fit, but the longer name it is first written under does not (ENAMETOOLONG).
+  it('stops with invalid_input when the state cannot be written, and leaves no lock or temp file', async () => {
+    const file = path.join(tmp, 'x'.repeat(250));
+    expect(`${path.basename(file)}.lock`).toHaveLength(255);
+    const rl = createRateLimiter(file);
+    const err = await rl.record(t0).catch((e: unknown) => e) as AgentError;
+    expect(err).toMatchObject({ name: 'AgentError', code: 'invalid_input' });
+    expect(err.message.startsWith(`Could not write the rate-limit state at ${file}: `)).toBe(true);
+    expect(err.message).toContain('ENAMETOOLONG');
+    expect(await readdir(tmp)).toEqual([]);
+    expect(await rl.snapshot(t0)).toEqual({ countLastHour: 0, secondsSinceLast: null, secondsUntilWindowFrees: 0 });
+  });
+});

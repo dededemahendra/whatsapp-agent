@@ -44,16 +44,17 @@ export function tempName(file: string): string {
   return `${file}.${process.pid}.${tempSeq}.${randomBytes(4).toString('hex')}.tmp`;
 }
 
+/** A failure here is refused like an unreadable file. Left as the bare fs error it would reach the agent as a wacli failure. */
 async function writeSends(file: string, sends: number[]): Promise<void> {
-  await ensurePrivateDir(path.dirname(file));
   const tmp = tempName(file);
   try {
+    await ensurePrivateDir(path.dirname(file));
     await writeFile(tmp, JSON.stringify({ sends: sends.map((n) => new Date(n).toISOString()) }), { mode: 0o600 });
     await chmod(tmp, 0o600);
     await rename(tmp, file);
   } catch (e) {
     await unlink(tmp).catch(() => undefined);
-    throw e;
+    throw new AgentError('invalid_input', `Could not write the rate-limit state at ${file}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -73,8 +74,8 @@ const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 /**
  * Runs `fn` while holding `<file>.lock`, created exclusively, so processes that share the state file take turns. The lock is always removed
- * afterwards. One left by a process that died is broken once it is old enough. (Two waiters can both judge the same lock stale; that
- * needs a lock more than 30 seconds old, which only a crashed process leaves behind.)
+ * afterwards. One left by a process that died is broken once it is old enough, and if it cannot be broken the call is refused. (Two waiters
+ * can both judge the same lock stale; that needs a lock more than 30 seconds old, which only a crashed process leaves behind.)
  */
 async function withLock<T>(file: string, tuning: LockTuning, fn: () => Promise<T>): Promise<T> {
   const lock = `${file}.lock`;
@@ -95,7 +96,14 @@ async function withLock<T>(file: string, tuning: LockTuning, fn: () => Promise<T
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw unlockable(e);
       const age = await stat(lock).then((s) => Date.now() - s.mtimeMs, () => null);
       if (age !== null && age > tuning.lockStaleMs) {
-        await unlink(lock).catch(() => undefined);
+        try {
+          await unlink(lock);
+        } catch (err) {
+          // Already gone (another waiter broke it first) is as good as cleared. Any other failure would send this loop round again at once, for ever.
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw new AgentError('invalid_input', `Could not clear a stale rate-limit lock at ${lock}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         continue;
       }
       if (Date.now() >= deadline) {
