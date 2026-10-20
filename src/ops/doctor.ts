@@ -1,5 +1,5 @@
 import type { Paths } from '../paths.js';
-import type { Policy } from '../policy/schema.js';
+import { loadPolicy, type Policy } from '../policy/schema.js';
 import { summarizePolicy, type PolicySummary } from '../policy/summary.js';
 import type { Runner } from '../wacli/runner.js';
 import { getStatus, type StatusInfo } from '../wacli/status.js';
@@ -10,13 +10,14 @@ import type { ServiceManager, ServiceStatus } from './service-types.js';
 export interface DoctorReport {
   status: StatusInfo;
   wacli_bin: string;
-  policy: PolicySummary;
+  /** Null when the policy file could not be loaded; the reason is then in `problems`. */
+  policy: PolicySummary | null;
   service: ServiceStatus | null;
   paths: { config_dir: string; data_dir: string; policy_file: string; audit_file: string; daemon_log: string };
   problems: string[];
 }
 
-export async function collectDoctor(opts: { runner: Runner; policy: Policy; paths: Paths; service: ServiceManager | null; now: () => Date }): Promise<DoctorReport> {
+export async function collectDoctor(opts: { runner: Runner; policyFile: string; paths: Paths; service: ServiceManager | null; now: () => Date }): Promise<DoctorReport> {
   const problems: string[] = [];
   let status: StatusInfo;
   try {
@@ -38,7 +39,14 @@ export async function collectDoctor(opts: { runner: Runner; policy: Policy; path
   if (status.session_revoked) {
     problems.push('WhatsApp revoked the linked session. Run: whatsapp-agent setup');
   }
-  for (const entry of opts.policy.writes.allow) {
+  let policy: Policy | null = null;
+  try {
+    policy = await loadPolicy(opts.policyFile);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    problems.push(message.includes(opts.policyFile) ? message : `${opts.policyFile}: ${message}`);
+  }
+  for (const entry of policy?.writes.allow ?? []) {
     if (isInertEntry(entry)) problems.push(`Allowlist entry "${entry}" is not a phone number or JID and never matches. Replace it with: whatsapp-agent policy allow <number or JID>`);
   }
   const service = opts.service ? await opts.service.status() : null;
@@ -50,7 +58,7 @@ export async function collectDoctor(opts: { runner: Runner; policy: Policy; path
   return {
     status,
     wacli_bin: opts.runner.bin,
-    policy: summarizePolicy(opts.policy),
+    policy: policy ? summarizePolicy(policy) : null,
     service,
     paths: {
       config_dir: opts.paths.configDir, data_dir: opts.paths.dataDir, policy_file: opts.paths.policyFile,
@@ -70,7 +78,9 @@ export function formatDoctor(r: DoctorReport): string {
     `daemon heartbeat: ${s.heartbeat_at ? `${s.heartbeat_at} (${s.heartbeat_age_seconds}s ago)` : 'none'}`,
     `daemon service: ${r.service ? r.service.detail : 'not supported on this platform'}`,
     `store: ${s.store_dir ?? 'unknown'} (${s.counts.chats ?? '?'} chats, ${s.counts.messages ?? '?'} messages)`,
-    `writes: ${r.policy.writes_enabled ? 'enabled' : 'disabled'}, confirm: ${r.policy.confirm}, allowlist: ${r.policy.allow_count}, groups: ${r.policy.groups_enabled ? 'on' : 'off'}, file roots: ${r.policy.file_roots_count}`,
+    r.policy
+      ? `writes: ${r.policy.writes_enabled ? 'enabled' : 'disabled'}, confirm: ${r.policy.confirm}, allowlist: ${r.policy.allow_count}, groups: ${r.policy.groups_enabled ? 'on' : 'off'}, file roots: ${r.policy.file_roots_count}`
+      : 'writes: unknown (the policy file could not be loaded)',
     `config: ${r.paths.policy_file}`,
     `audit: ${r.paths.audit_file}`,
     `daemon log: ${r.paths.daemon_log}`,
