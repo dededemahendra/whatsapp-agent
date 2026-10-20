@@ -5,6 +5,7 @@ import { createServiceManager, isGlobalInstall, launchdPlist, launchdPlistPath, 
 import { followFile, tailFile } from '../../src/ops/tail.js';
 import { resolvePaths } from '../../src/paths.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
+import { waitFor } from '../helpers/wait.js';
 
 const sp: ServicePaths = {
   nodePath: '/usr/local/bin/node', cliPath: '/usr/local/lib/node_modules/whatsapp-agent/dist/cli.js', wacliBin: '/opt/homebrew/bin/wacli',
@@ -196,6 +197,20 @@ describe('tailFile', () => {
     expect(await tailFile(f, 2)).toBe('c\nd\n');
     expect(await tailFile(f, 10)).toBe('a\nb\nc\nd\n');
     expect(await tailFile(path.join(tmp, 'missing'), 3)).toBe('');
+  });
+  it('followFile shows a log created after following started from its beginning', async () => {
+    const f = path.join(tmp, 'later.log');
+    const chunks: string[] = [];
+    const stop = followFile(f, (c) => chunks.push(c), 10);
+    try {
+      await stop.ready;
+      await writeFile(f, 'first line\nsecond line\n');
+      await waitFor(() => chunks.join('') === 'first line\nsecond line\n', { what: 'the new log to be shown from its beginning' });
+      await appendFile(f, 'third line\n');
+      await waitFor(() => chunks.join('') === 'first line\nsecond line\nthird line\n', { what: 'the appended line' });
+    } finally {
+      stop();
+    }
   });
   it('followFile prints only bytes appended after it starts, intact after multi-byte text', async () => {
     const f = path.join(tmp, 'log');

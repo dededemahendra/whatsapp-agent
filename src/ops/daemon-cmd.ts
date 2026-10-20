@@ -1,12 +1,19 @@
 import { Command } from 'commander';
 import { AgentError } from '../errors.js';
-import { ensureDirs, resolvePaths } from '../paths.js';
+import { ensureDirs, resolvePaths, type Paths } from '../paths.js';
 import { loadPolicy } from '../policy/schema.js';
 import { startSupervisor } from './daemon.js';
 import { isGlobalInstall, serviceManagerForThisMachine, servicePathsForThisMachine } from './service.js';
+import type { ServiceManager } from './service-types.js';
 import { followFile, tailFile } from './tail.js';
 
-export function daemonCommand(): Command {
+export interface DaemonCommandDeps {
+  /** Builds the service manager; tests pass a stub so no launchctl or systemctl runs. */
+  service?: (paths: Paths) => ServiceManager | null;
+}
+
+export function daemonCommand(deps: DaemonCommandDeps = {}): Command {
+  const serviceFor = deps.service ?? serviceManagerForThisMachine;
   const cmd = new Command('daemon').description('Keep the WhatsApp mirror in sync in the background');
 
   cmd.command('run').description('Run the sync supervisor in the foreground (service installers call this)').action(async () => {
@@ -32,7 +39,7 @@ export function daemonCommand(): Command {
     if (!isGlobalInstall(sp.cliPath)) {
       throw new AgentError('invalid_input', 'daemon install needs a global install so the service has a stable path. Run: npm i -g whatsapp-agent, then: whatsapp-agent daemon install');
     }
-    const manager = serviceManagerForThisMachine(paths);
+    const manager = serviceFor(paths);
     if (!manager) throw new AgentError('invalid_input', 'Service installation is supported on macOS and Linux only. Run `whatsapp-agent daemon run` under your own supervisor.');
     const file = await manager.install();
     process.stdout.write(`Installed ${file}\n${(await manager.status()).detail}\nLogs: ${paths.daemonLog}\n`);
@@ -40,15 +47,16 @@ export function daemonCommand(): Command {
 
   cmd.command('uninstall').description('Remove the login service').action(async () => {
     const paths = resolvePaths();
-    const manager = serviceManagerForThisMachine(paths);
+    const manager = serviceFor(paths);
     if (!manager) throw new AgentError('invalid_input', 'No service support on this platform.');
+    const before = await manager.status();
     await manager.uninstall();
-    process.stdout.write('Service removed.\n');
+    process.stdout.write(before.installed ? 'Service removed.\n' : 'No service was installed.\n');
   });
 
   cmd.command('status').description('Show whether the service is installed and running').action(async () => {
     const paths = resolvePaths();
-    const manager = serviceManagerForThisMachine(paths);
+    const manager = serviceFor(paths);
     const s = manager ? await manager.status() : { installed: false, running: null, detail: 'not supported on this platform' };
     process.stdout.write(`${s.detail}\n`);
     if (!manager || !s.running) process.exitCode = 1;

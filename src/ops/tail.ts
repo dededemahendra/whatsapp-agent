@@ -12,8 +12,11 @@ export async function tailFile(file: string, lines: number): Promise<string> {
   return all.slice(Math.max(0, all.length - lines)).map((l) => l + '\n').join('');
 }
 
-/** Print bytes appended after the call, polling every `intervalMs`, until the returned function is called. */
-export function followFile(file: string, write: (chunk: string) => void, intervalMs = 1000): () => void {
+/**
+ * Print bytes appended after the call, polling every `intervalMs`, until the returned function is called.
+ * A file that does not exist yet is shown from its beginning once it appears. `ready` settles after the first poll.
+ */
+export function followFile(file: string, write: (chunk: string) => void, intervalMs = 1000): (() => void) & { ready: Promise<void> } {
   let offset = -1;
   const poll = async (): Promise<void> => {
     try {
@@ -24,11 +27,11 @@ export function followFile(file: string, write: (chunk: string) => void, interva
         write(bytes.subarray(offset, size).toString('utf8'));
         offset = size;
       }
-    } catch {
-      // file may not exist yet
+    } catch (e) {
+      if (offset < 0 && (e as NodeJS.ErrnoException).code === 'ENOENT') offset = 0;
     }
   };
-  void poll();
+  const ready = poll();
   const timer = setInterval(() => { void poll(); }, intervalMs);
-  return () => clearInterval(timer);
+  return Object.assign(() => clearInterval(timer), { ready });
 }
