@@ -189,7 +189,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         recipient = await deps.resolver.resolve(a.chat);
         const d = await gate(ctx, 'mark_read', recipient);
         if (d.kind === 'deny') return denied('mark_read', recipient, d, {});
-        await deps.runner.write<WacliChatStateResult>(['chats', 'mark-read', `--chat=${recipient.jid}`]);
+        await deps.runner.write<WacliChatStateResult>(['chats', 'mark-read', `--chat=${recipient.jid}`], { idempotent: true });
         await record({ ...base('mark_read', recipient), outcome: 'sent' });
         return ok({ ok: true, chat: recipient });
       } catch (e) {

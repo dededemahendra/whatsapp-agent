@@ -8,11 +8,15 @@ export const WRITE_TIMEOUT_MS = 90_000;
 export const MEDIA_TIMEOUT_MS = 120_000;
 export const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MATCH_CAP = 4096;
+const UNREADABLE = 'wacli returned an unreadable response';
+const REPEATED_SEND = /repeated send/i;
 export const SEND_UNCERTAIN = 'The outcome is uncertain: read the chat before retrying, because the message may have gone through.';
 
 export interface RunOptions {
   timeoutMs?: number;
   env?: Record<string, string>;
+  /** The write can be repeated without harm, so a failure is not reported as an uncertain outcome. */
+  idempotent?: boolean;
 }
 
 export interface SpawnResult { stdout: string; stderr: string; code: number }
@@ -33,6 +37,7 @@ export interface Runner {
 }
 
 interface Envelope { success: boolean; data: unknown; error: string | null }
+type Found = { kind: 'none' } | { kind: 'unreadable' } | { kind: 'envelope'; env: Record<string, unknown> };
 
 export const defaultSpawn: SpawnFn = (bin, args, env, timeoutMs) =>
   new Promise((resolve, reject) => {
@@ -82,9 +87,22 @@ function tooOld(stderr: string): AgentError {
   return new AgentError('wacli_too_old', `wacli is older than the minimum ${MIN_WACLI_VERSION}. Upgrade with: brew upgrade wacli`, stderr ? { stderr_tail: tail(stderr) } : {});
 }
 
+function unreadable(stderr: string): AgentError {
+  return new AgentError('wacli_error', UNREADABLE, stderr ? { stderr_tail: tail(stderr) } : {});
+}
+
+/** Lower-cased text to match keywords against, capped, without quoted spans or path-like tokens: those can carry user input such as a file or recipient name. */
+function forMatching(text: string): string {
+  return text.slice(0, MATCH_CAP).toLowerCase()
+    .replace(/"[^"\n]*"/g, ' ')
+    .replace(/(?<!\w)'[^'\n]*'(?!\w)/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/\/\S+/g, ' ');
+}
+
 /** Maps wacli's wording to an error code. `text` is what the keywords are matched against; `message` is what the agent reads when nothing matches. */
 function classify(message: string, text: string, stderr: string): AgentError {
-  const m = text.slice(0, MATCH_CAP).toLowerCase();
+  const m = forMatching(text);
   if (m.includes('unknown flag: --read-only') || m.includes('unknown flag: --account') || m.includes('unknown flag: --timeout')) {
     return tooOld(stderr);
   }
@@ -97,11 +115,11 @@ function classify(message: string, text: string, stderr: string): AgentError {
   if (m.includes('store is locked') || m.includes('waiting for store lock')) {
     return new AgentError('store_locked', 'The wacli store is locked by another process. Check `whatsapp-agent daemon status`.');
   }
-  if (m.includes('deadline exceeded') || m.includes('timed out') || m.includes('timeout')) {
-    return new AgentError('timeout', `wacli reported a timeout: ${message}. If this was a send, read the chat before retrying: the message may have gone through.`);
-  }
   if (m.includes('not found') || m.includes('no such') || m.includes('unknown chat')) {
     return new AgentError('not_found', message);
+  }
+  if (m.includes('deadline exceeded') || m.includes('timed out') || m.includes('timeout')) {
+    return new AgentError('timeout', `wacli reported a timeout: ${message}. If this was a send, read the chat before retrying: the message may have gone through.`);
   }
   return new AgentError('wacli_error', message, stderr ? { stderr_tail: tail(stderr) } : {});
 }
@@ -110,34 +128,47 @@ export function classifyMessage(message: string, stderr = ''): AgentError {
   return classify(message, message, stderr);
 }
 
-/** The first JSON object in a stream: the whole text first, then each non-empty line from the last backwards. */
-function findEnvelope(text: string): Partial<Envelope> | null {
+/** Finds the envelope in a stream: the whole text as JSON first, then each non-empty line from the last backwards. */
+function findEnvelope(text: string): Found {
   const t = text.trim();
-  if (t === '') return null;
-  const attempts = [t, ...t.split('\n').map((l) => l.trim()).filter((l) => l !== '').reverse()];
-  for (const attempt of attempts) {
+  if (t === '') return { kind: 'none' };
+  const lines = t.split('\n').map((l) => l.trim()).filter((l) => l !== '').reverse();
+  for (const [i, attempt] of [t, ...lines].entries()) {
+    let v: unknown;
     try {
-      const v: unknown = JSON.parse(attempt);
-      if (typeof v === 'object' && v !== null && !Array.isArray(v)) return v as Partial<Envelope>;
+      v = JSON.parse(attempt);
     } catch {
-      // not JSON; try the next line
+      continue;
     }
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) return { kind: 'envelope', env: v as Record<string, unknown> };
+    if (i === 0) return { kind: 'unreadable' };
   }
-  return null;
+  return { kind: 'none' };
+}
+
+/** The error a failure envelope reports: classified when it is a string, unreadable when it is anything else, null when absent. */
+function failureOf(env: Record<string, unknown>, stderr: string): AgentError | null {
+  if (typeof env.error === 'string') return classifyMessage(env.error, stderr);
+  return env.error === undefined || env.error === null ? null : unreadable(stderr);
 }
 
 export function parseEnvelope<T>(stdout: string, stderr: string): T {
-  const env = findEnvelope(stdout);
-  if (!env) throw new AgentError('wacli_error', 'wacli returned output that is not JSON', { stderr_tail: tail(stderr) });
-  if (!env.success) throw classifyMessage(env.error ?? 'wacli reported failure', stderr);
-  return env.data as T;
+  const found = findEnvelope(stdout);
+  if (found.kind === 'none') throw new AgentError('wacli_error', 'wacli returned output that is not JSON', { stderr_tail: tail(stderr) });
+  if (found.kind === 'unreadable') throw unreadable(stderr);
+  if (found.env.success) return found.env.data as T;
+  throw failureOf(found.env, stderr) ?? classifyMessage('wacli reported failure', stderr);
 }
 
-/** A failed run: wacli's JSON error envelope on stderr (or stdout) when there is one, else the keywords in the whole stderr text. */
+/** A failed run: wacli's JSON error envelope on stderr (or stdout when stderr is empty) when there is one, else the keywords in the whole text. */
 export function classifyFailure(code: number, stdout: string, stderr: string): AgentError {
   const text = stderr.trim() !== '' ? stderr : stdout;
-  const env = findEnvelope(text);
-  if (env && env.success === false && typeof env.error === 'string') return classifyMessage(env.error, stderr);
+  const found = findEnvelope(text);
+  if (found.kind === 'unreadable') return unreadable(stderr);
+  if (found.kind === 'envelope' && found.env.success === false) {
+    const err = failureOf(found.env, stderr);
+    if (err) return err;
+  }
   return classify(lastNonEmptyLine(text) || `wacli exited with code ${code}`, text, stderr);
 }
 
@@ -157,6 +188,9 @@ export function createRunner(cfg: RunnerConfig): Runner {
     const timeoutMs = opts.timeoutMs ?? (mode === 'read' ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS);
     const wacliTimeout = `${Math.max(1, Math.floor(timeoutMs / 1000) - 5)}s`;
     const full = [...prefix, '--json', '--timeout', wacliTimeout, ...(mode === 'read' ? ['--read-only'] : []), ...args];
+    if (full.some((a) => a.includes('\0'))) throw new AgentError('invalid_input', 'Input must not contain NUL characters.');
+    // A failed write may or may not have gone through, unless repeating it is harmless.
+    const mark = mode === 'write' && !opts.idempotent ? markUncertain : (e: AgentError): AgentError => e;
     const env: NodeJS.ProcessEnv = { ...baseEnv, NO_COLOR: '1', ...opts.env };
     if (mode === 'read') env.WACLI_READONLY = '1';
     else delete env.WACLI_READONLY;
@@ -165,17 +199,17 @@ export function createRunner(cfg: RunnerConfig): Runner {
     try {
       r = await spawn(cfg.bin, full, env, timeoutMs);
     } catch (e) {
-      throw mode === 'write' && e instanceof AgentError ? markUncertain(e) : e;
+      throw e instanceof AgentError ? mark(e) : e;
     }
-    if (r.code !== 0) {
-      const err = classifyFailure(r.code, r.stdout, r.stderr);
-      throw mode === 'write' ? markUncertain(err) : err;
-    }
+    if (r.code !== 0) throw mark(classifyFailure(r.code, r.stdout, r.stderr));
+    let data: T;
     try {
-      return parseEnvelope<T>(r.stdout, r.stderr);
+      data = parseEnvelope<T>(r.stdout, r.stderr);
     } catch (e) {
-      throw mode === 'write' && e instanceof AgentError ? markUncertain(e) : e;
+      throw e instanceof AgentError ? mark(e) : e;
     }
+    if (mode === 'write' && REPEATED_SEND.test(r.stderr)) debug('wacli warning', { kind: 'repeated_send' });
+    return data;
   }
 
   return {

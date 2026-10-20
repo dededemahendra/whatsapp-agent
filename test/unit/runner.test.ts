@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentError } from '../../src/errors.js';
 import { classifyFailure, classifyMessage, createRunner, parseEnvelope } from '../../src/wacli/runner.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, readArgvLog, removeTmp } from '../helpers/fake.js';
@@ -193,5 +193,97 @@ describe('classification looks at the whole text', () => {
   it('parseEnvelope finds the envelope on any line, from the last backwards', () => {
     expect(parseEnvelope('log line\n{"success":true,"data":{"a":1},"error":null}\ntrailing log\n', '')).toEqual({ a: 1 });
     expect(() => parseEnvelope('log line\n{"success":false,"data":null,"error":"chat not found"}\ntrailing log\n', '')).toThrowError(expect.objectContaining({ code: 'not_found' }));
+  });
+});
+
+describe('runner hardening', () => {
+  const UNREADABLE = 'wacli returned an unreadable response';
+  const send = ['send', 'text', '--to=x@s.whatsapp.net', '--message=hi'];
+
+  async function fixtureDir(files: Record<string, string>): Promise<string> {
+    const dir = path.join(tmp, 'fixtures');
+    await mkdir(dir, { recursive: true });
+    for (const [name, body] of Object.entries(files)) await writeFile(path.join(dir, name), body);
+    return dir;
+  }
+
+  it('leaves a failed idempotent write unmarked, because repeating it is harmless', async () => {
+    const failing = runner({ FAKE_WACLI_FAIL: '*|1|connection reset by peer' });
+    const err = await failing.write(['chats', 'mark-read', '--chat=x@s.whatsapp.net'], { idempotent: true }).catch((e: unknown) => e) as AgentError;
+    expect(err).toMatchObject({ code: 'wacli_error', message: 'connection reset by peer' });
+    expect(err.details.outcome_uncertain).toBeUndefined();
+    const plain = await failing.write(send).catch((e: unknown) => e) as AgentError;
+    expect(plain.details.outcome_uncertain).toBe(true);
+  });
+
+  it('refuses a NUL byte in any argument before spawning anything', async () => {
+    await expect(runner().read(['chats', 'list', '--query=a\0b'])).rejects.toMatchObject({ code: 'invalid_input', message: 'Input must not contain NUL characters.' });
+    const err = await runner().write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi\0there']).catch((e: unknown) => e) as AgentError;
+    expect(err).toMatchObject({ code: 'invalid_input', message: 'Input must not contain NUL characters.' });
+    expect(err.details.outcome_uncertain).toBeUndefined();
+    await expect(runner({}, 'wo\0rk').read(['doctor'])).rejects.toMatchObject({ code: 'invalid_input' });
+    expect(await readArgvLog(log)).toEqual([]);
+  });
+
+  it('turns a response that is not an object into a fixed message, never a TypeError', async () => {
+    for (const bad of ['null', '42', '"text"', '[1,2]', 'true']) {
+      expect(() => parseEnvelope(bad, '')).toThrowError(expect.objectContaining({ code: 'wacli_error', message: UNREADABLE }));
+      expect(classifyFailure(1, '', bad)).toMatchObject({ code: 'wacli_error', message: UNREADABLE });
+    }
+  });
+
+  it('turns an envelope whose error is not a string into the same fixed message', () => {
+    for (const bad of ['{"success":false,"data":null,"error":{"code":5}}', '{"success":false,"data":null,"error":42}']) {
+      expect(() => parseEnvelope(bad, '')).toThrowError(expect.objectContaining({ code: 'wacli_error', message: UNREADABLE }));
+      expect(classifyFailure(1, '', bad)).toMatchObject({ code: 'wacli_error', message: UNREADABLE });
+    }
+    expect(() => parseEnvelope('{"success":false,"data":null,"error":null}', '')).toThrowError(expect.objectContaining({ message: 'wacli reported failure' }));
+  });
+
+  it('reports an unreadable response from the process, and still marks a write uncertain', async () => {
+    const dir = await fixtureDir({ 'chats_list.json': 'null\n', 'send_text.json': '{"success":false,"data":null,"error":{"code":5}}\n' });
+    await expect(runner({ FAKE_WACLI_FIXTURES: dir }).read(['chats', 'list'])).rejects.toMatchObject({ code: 'wacli_error', message: UNREADABLE });
+    const err = await runner({ FAKE_WACLI_FIXTURES: dir }).write(send).catch((e: unknown) => e) as AgentError;
+    expect(err).toMatchObject({ code: 'wacli_error', message: expect.stringContaining(UNREADABLE), details: { outcome_uncertain: true } });
+    expect(err.message).toContain('The outcome is uncertain');
+  });
+
+  it('ignores quoted text and path-like tokens when it classifies, and tests not found before timeout', () => {
+    expect(classifyMessage('no such file or directory: /tmp/timeout.png').code).toBe('not_found');
+    expect(classifyMessage('chat not found: timeout').code).toBe('not_found');
+    expect(classifyMessage('invalid recipient "logged out"').code).toBe('wacli_error');
+    expect(classifyMessage("cannot send to 'not authenticated'").code).toBe('wacli_error');
+    expect(classifyMessage('failed to parse `timed out`').code).toBe('wacli_error');
+    expect(classifyMessage('open /var/lib/logged_out/session: permission denied').code).toBe('wacli_error');
+    expect(classifyMessage('not authenticated; run `wacli auth`').code).toBe('not_authenticated');
+    expect(classifyMessage('send text: context deadline exceeded').code).toBe('timeout');
+  });
+
+  it('does not treat an apostrophe as a quote', () => {
+    expect(classifyMessage("can't send: store is locked; it's busy").code).toBe('store_locked');
+  });
+
+  it('logs the repeated send warning as metadata only, and only after a write', async () => {
+    vi.stubEnv('WHATSAPP_AGENT_LOG', 'debug');
+    vi.resetModules();
+    const fresh = await import('../../src/wacli/runner.js');
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const warned = fresh.createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_WARN: 'repeated' }) });
+      await warned.write(['send', 'text', '--to=x@s.whatsapp.net', '--message=secret-body-text']);
+      const written = stderr.mock.calls.map((c) => String(c[0])).join('');
+      expect(written).toContain('[whatsapp-agent] wacli warning {"kind":"repeated_send"}');
+      expect(written).not.toContain('secret-body-text');
+      expect(written).not.toContain('5 seconds');
+
+      stderr.mockClear();
+      await warned.read(['doctor']);
+      await fresh.createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv() }).write(send);
+      expect(stderr.mock.calls.map((c) => String(c[0])).join('')).not.toContain('wacli warning');
+    } finally {
+      stderr.mockRestore();
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 });

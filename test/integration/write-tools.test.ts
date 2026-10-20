@@ -206,6 +206,19 @@ describe('react and mark_read', () => {
     expect((await h.call('react', { chat: 'Alice', message_id: 'MSG1', reaction: '😀😀😀😀😀😀😀😀😀' })).isError).toBe(true);
   });
 
+  it('does not call a failed mark_read uncertain, because repeating it is harmless', async () => {
+    h = await makeHarness({ policy: enabled(), env: { FAKE_WACLI_FAIL: 'chats mark-read|1|connection reset by peer' } });
+    const r = await h.call('mark_read', { chat: 'Alice' });
+    expect(r.isError).toBe(true);
+    expect(errorOf(r)).toMatchObject({ error: 'wacli_error', message: 'connection reset by peer' });
+    expect(errorOf(r).outcome_uncertain).toBeUndefined();
+    await h.close();
+
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|connection reset by peer' } });
+    const sent = errorOf(await h.call('send_text', { to: 'Alice', message: 'x' }));
+    expect(sent).toMatchObject({ error: 'wacli_error', outcome_uncertain: true });
+  });
+
   it('marks read without a prompt once writes are enabled', async () => {
     h = await makeHarness({ policy: enabled() });
     const r = await h.call('mark_read', { chat: 'Alice' });

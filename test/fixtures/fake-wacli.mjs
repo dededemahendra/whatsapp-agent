@@ -135,4 +135,5 @@ if (key === 'media download') {
   writeFileSync(target, png);
   text = text.replaceAll('__OUTPUT__', target).replaceAll('"__BYTES__"', String(png.length));
 }
+if (process.env.FAKE_WACLI_WARN === 'repeated') process.stderr.write('warning: repeated send within 5 seconds\n');
 process.stdout.write(text.endsWith('\n') ? text : text + '\n');
