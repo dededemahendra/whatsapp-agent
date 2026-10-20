@@ -135,3 +135,8 @@ export function phoneFromJid(jid: string | undefined | null): string | null {
   const digits = (jid.split('@')[0] ?? '').split(':')[0] ?? '';
   return /^\d{6,}$/.test(digits) ? `+${digits}` : null;
 }
+
+/** wacli (Go) encodes an empty list as null; treat anything that is not an array as empty. */
+export function asList<T>(v: T[] | null | undefined): T[] {
+  return Array.isArray(v) ? v : [];
+}

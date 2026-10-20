@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { kindFromJid, kindFromWacli, phoneFromJid, toChat, toContact, toGroup, toIso, toMessage, toParticipant } from '../../src/wacli/shape.js';
+import { asList, kindFromJid, kindFromWacli, phoneFromJid, toChat, toContact, toGroup, toIso, toMessage, toParticipant } from '../../src/wacli/shape.js';
 
 describe('kinds', () => {
   it('derives kind from the JID suffix', () => {
@@ -74,5 +74,13 @@ describe('contacts, groups, participants, phones', () => {
     expect(phoneFromJid('61400000000:7@s.whatsapp.net')).toBe('+61400000000');
     expect(phoneFromJid('1@g.us')).toBeNull();
     expect(phoneFromJid(undefined)).toBeNull();
+  });
+});
+
+describe('asList', () => {
+  it('treats null and undefined as empty and passes arrays through', () => {
+    expect(asList(null)).toEqual([]);
+    expect(asList(undefined)).toEqual([]);
+    expect(asList([1, 2])).toEqual([1, 2]);
   });
 });
