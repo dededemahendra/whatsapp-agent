@@ -80,20 +80,24 @@ function deny(code: DenyCode, retryAfterSeconds?: number): Decision {
 export function decide(i: DecideInput): Decision {
   const w = i.policy.writes;
   if (!w.enabled) return deny('writes_disabled');
-  if (i.tool === 'mark_read') return { kind: 'allow' };
-  if (i.recipient.kind !== 'user' && i.recipient.kind !== 'group') return deny('unsupported_target');
-  if (i.recipient.kind === 'group' && !w.groups) return deny('groups_disabled');
-  if (i.tool === 'send_file' && i.fileInsideRoots !== true) return deny('file_outside_roots');
 
-  if (i.rate.countLastHour >= w.rateLimit.perHour) return deny('rate_limited', Math.max(1, Math.ceil(i.rate.secondsUntilWindowFrees)));
-  if (i.rate.secondsSinceLast !== null && i.rate.secondsSinceLast < w.rateLimit.minGapSeconds) {
-    return deny('rate_limited', Math.max(1, Math.ceil(w.rateLimit.minGapSeconds - i.rate.secondsSinceLast)));
+  // mark_read has no target, group, file or rate rules of its own. Every other tool passes them before anyone is asked.
+  if (i.tool !== 'mark_read') {
+    if (i.recipient.kind !== 'user' && i.recipient.kind !== 'group') return deny('unsupported_target');
+    if (i.recipient.kind === 'group' && !w.groups) return deny('groups_disabled');
+    if (i.tool === 'send_file' && i.fileInsideRoots !== true) return deny('file_outside_roots');
+
+    if (i.rate.countLastHour >= w.rateLimit.perHour) return deny('rate_limited', Math.max(1, Math.ceil(i.rate.secondsUntilWindowFrees)));
+    if (i.rate.secondsSinceLast !== null && i.rate.secondsSinceLast < w.rateLimit.minGapSeconds) {
+      return deny('rate_limited', Math.max(1, Math.ceil(w.rateLimit.minGapSeconds - i.rate.secondsSinceLast)));
+    }
   }
 
-  // A decline is final for this call whatever the policy says now: the person was asked and said no, and the policy may have changed since
-  // the prompt (confirm set to never, the recipient allowlisted) so that no prompt would be shown today.
+  // A decline is final for this call, for every tool, whatever the policy says now: the person was asked and said no, and the policy may
+  // have changed since the prompt (confirm set to never, the recipient allowlisted) so that no prompt would be shown today.
   if (i.answer === 'declined') return deny('confirmation_declined');
 
+  if (i.tool === 'mark_read') return { kind: 'allow' };
   const needsConfirmation = w.confirm === 'always' || (w.confirm === 'unlisted' && !matchesAllow(w.allow, i.recipient));
   if (!needsConfirmation) return { kind: 'allow' };
   if (!i.clientCanConfirm) return deny('confirmation_unavailable');
