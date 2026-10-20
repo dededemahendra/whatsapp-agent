@@ -16,12 +16,16 @@ export async function removeTmp(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true });
 }
 
-/** Environment for spawning the fake. Strips inherited wacli variables the runner must set itself; values passed in `extra` are kept. */
+/** Environment for spawning the fake. Strips inherited wacli variables the runner must set itself, and the whatsapp-agent overrides (binary, config and data directories, log level) so a developer's own setup cannot leak into a test; values passed in `extra` are kept. */
 export function fakeEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.WACLI_READONLY;
   delete env.WACLI_MEDIA_ROOTS;
   delete env.NO_COLOR;
+  delete env.WHATSAPP_AGENT_WACLI_BIN;
+  delete env.WHATSAPP_AGENT_CONFIG_DIR;
+  delete env.WHATSAPP_AGENT_DATA_DIR;
+  delete env.WHATSAPP_AGENT_LOG;
   return { ...env, FAKE_WACLI_FIXTURES: FIXTURES, ...extra };
 }
 

@@ -7,10 +7,15 @@ import { createRunner } from '../wacli/runner.js';
 import { isGlobalInstall, serviceManagerForThisMachine, servicePathsForThisMachine } from './service.js';
 import { runSetup, type SetupIO } from './setup.js';
 
-function realIo(): SetupIO {
+export function realIo(input: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin, output: NodeJS.WritableStream = process.stdout): SetupIO {
   return {
     async ask(question) {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      if (!input.isTTY) {
+        output.write(`${question} [y/N]\n`);
+        output.write('Not a terminal, so no questions are asked. Pass --install-wacli, --service or --no-service to answer them.\n');
+        return false;
+      }
+      const rl = readline.createInterface({ input, output });
       try {
         const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
         return answer === 'y' || answer === 'yes';
@@ -18,12 +23,15 @@ function realIo(): SetupIO {
         rl.close();
       }
     },
-    print: (text) => process.stdout.write(text + '\n'),
+    print: (text) => { output.write(text + '\n'); },
     which: (bin) => new Promise((resolve) => execFile('which', [bin], (err, stdout) => resolve(err ? null : (stdout.trim().split('\n')[0] ?? null)))),
     run: (cmd, args) => new Promise((resolve) => {
       const child = spawn(cmd, args, { stdio: 'inherit' });
       child.on('close', (code) => resolve(code ?? 1));
-      child.on('error', () => resolve(1));
+      child.on('error', (err) => {
+        process.stderr.write(`${cmd}: ${err.message}\n`);
+        resolve(1);
+      });
     }),
     exists: (file) => access(file).then(() => true, () => false),
   };
@@ -41,7 +49,7 @@ export function setupCommand(): Command {
         io: realIo(),
         paths,
         env: process.env,
-        makeRunner: (bin) => createRunner({ bin, baseEnv: process.env }),
+        makeRunner: (bin, account) => createRunner({ bin, account, baseEnv: process.env }),
         service: serviceManagerForThisMachine(paths),
         isGlobal: isGlobalInstall(servicePathsForThisMachine(paths).cliPath),
         flags: { service: opts.service, installWacli: opts.installWacli },
