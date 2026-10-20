@@ -2,6 +2,7 @@ import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AgentError } from '../../src/errors.js';
 import { realIo } from '../../src/ops/setup-cmd.js';
 import { BAN_NOTICE, runSetup, type SetupIO } from '../../src/ops/setup.js';
 import { resolvePaths } from '../../src/paths.js';
@@ -242,6 +243,43 @@ describe('runSetup pairing', () => {
   });
 });
 
+describe('runSetup pairing check outcomes', () => {
+  /** A wacli whose every read fails with `error`, as when the binary vanishes between the version check and the pairing check. */
+  function failingWacli(error: Error): Runner {
+    return { bin: 'stub-wacli', read: async () => { throw error; }, write: async () => { throw new Error('setup must not write through wacli'); }, version: async () => '0.22.0' };
+  }
+
+  it('treats not authenticated as unpaired and silent, then goes on to the pairing handoff', async () => {
+    const t = io({});
+    const ok = await runSetup({ io: t.io, ...opts({ FAKE_WACLI_FAIL: 'auth status|1|not authenticated; run `wacli auth`' }), service: null, isGlobal: true, flags: {} });
+    const text = t.out.join('\n');
+    expect(t.runs).toEqual([[FAKE_WACLI, 'auth']]);
+    expect(text).toContain('Link a device');
+    expect(text).not.toContain('`whatsapp-agent setup`');
+    expect(ok).toBe(false);
+    expect(text).toContain('Pairing did not complete');
+  });
+
+  it('treats a timeout as fatal: it prints the reason and starts no pairing', async () => {
+    const o = opts({ FAKE_WACLI_FAIL: 'auth status|1|context deadline exceeded' });
+    const t = io({});
+    expect(await runSetup({ io: t.io, ...o, service: null, isGlobal: true, flags: {} })).toBe(false);
+    expect(t.out.join('\n')).toContain('wacli reported a timeout: context deadline exceeded');
+    expect(t.runs).toEqual([]);
+    expect(await fileExists(o.paths.policyFile)).toBe(false);
+  });
+
+  it('treats wacli not being installed as fatal: it prints the reason and starts no pairing', async () => {
+    const o = opts();
+    const s = spy(o, failingWacli(new AgentError('wacli_not_installed', 'wacli was not found at "wacli". Install it with: brew install openclaw/tap/wacli')));
+    const t = io({});
+    expect(await runSetup({ io: t.io, ...o, makeRunner: s.makeRunner, service: null, isGlobal: true, flags: {} })).toBe(false);
+    expect(t.out.join('\n')).toContain('wacli was not found');
+    expect(t.runs).toEqual([]);
+    expect(await fileExists(o.paths.policyFile)).toBe(false);
+  });
+});
+
 describe('runSetup finding and installing wacli', () => {
   it('prints the brew and go install lines and stops when the person declines', async () => {
     const t = io({ found: null, answers: [false] });
@@ -409,6 +447,53 @@ describe('realIo', () => {
     const cancelled = expect(pending).rejects.toThrow('Setup cancelled');
     input.write('\x03');
     await cancelled;
+  });
+
+  describe('ending the line a prompt leaves open', () => {
+    const terminal = () => {
+      const out = Object.assign(new PassThrough(), { isTTY: true, columns: 80 });
+      const chunks: string[] = [];
+      out.setEncoding('utf8');
+      out.on('data', (c: string) => chunks.push(c));
+      return { out, text: async () => { await new Promise((r) => setImmediate(r)); return chunks.join(''); } };
+    };
+
+    it('writes a newline when the input ends at a prompt on a terminal', async () => {
+      const input = Object.assign(new PassThrough(), { isTTY: true });
+      const t = terminal();
+      const pending = realIo(input, t.out).ask('Q');
+      input.end();
+      expect(await pending).toBe(false);
+      expect((await t.text()).endsWith('\n')).toBe(true);
+    });
+
+    it('writes a newline when Ctrl+C cancels at a prompt on a terminal', async () => {
+      const input = Object.assign(new PassThrough(), { isTTY: true });
+      const t = terminal();
+      const pending = realIo(input, t.out).ask('Q');
+      const cancelled = expect(pending).rejects.toThrow('Setup cancelled');
+      input.write('\x03');
+      await cancelled;
+      expect((await t.text()).endsWith('\n')).toBe(true);
+    });
+
+    it('writes nothing extra when the output is not a terminal', async () => {
+      const input = Object.assign(new PassThrough(), { isTTY: true });
+      const s = sink();
+      const pending = realIo(input, s.out).ask('Q');
+      input.end();
+      expect(await pending).toBe(false);
+      expect(await s.text()).toBe('Q [y/N] ');
+    });
+
+    it('writes no extra blank line after an answer that was given', async () => {
+      const input = Object.assign(new PassThrough(), { isTTY: true });
+      const t = terminal();
+      const pending = realIo(input, t.out).ask('Q');
+      input.write('y\n');
+      expect(await pending).toBe(true);
+      expect((await t.text()).endsWith('\n\n')).toBe(false);
+    });
   });
 
   it('prints to the injected output with a trailing newline', async () => {
