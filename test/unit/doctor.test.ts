@@ -29,7 +29,8 @@ describe('doctor', () => {
     expect(text).toContain('writes: disabled');
     expect(text).toContain('last activity: none');
     expect(text).not.toMatch(/heartbeat/i);
-    expect(text).toContain('connection: in use by the daemon (expected)');
+    expect(text).toContain('connection: locked by another process');
+    expect(text).not.toContain('in use by the daemon');
     expect(text).toContain(`data dir: ${paths.dataDir}`);
     expect(text).toContain(`host command: ${claudeMcpAddCommand(paths)}`);
     expect(text).toContain('No problems found.');
@@ -37,14 +38,41 @@ describe('doctor', () => {
     expect(r.host_command).toBe(claudeMcpAddCommand(paths));
   });
 
+  describe('a store that wacli reports as locked by another process', () => {
+    const labelled = async (service: { installed: boolean; running: boolean | null; detail: string } | null): Promise<string> => {
+      const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+      const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+      const manager = service && { install: async () => '', uninstall: async () => {}, status: async () => service };
+      const text = formatDoctor(await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: manager, now: () => new Date() }));
+      return text.split('\n').find((l) => l.startsWith('connection:'))!;
+    };
+
+    it('is called the daemon, and expected, only when the service says it is running', async () => {
+      expect(await labelled({ installed: true, running: true, detail: 'installed, running' })).toBe('connection: in use by the daemon (expected)');
+    });
+
+    it.each([
+      ['a service that is installed but stopped', { installed: true, running: false, detail: 'installed, inactive' }],
+      ['a service whose state is not known', { installed: true, running: null, detail: 'installed' }],
+      ['a service that is not installed', { installed: false, running: null, detail: 'not installed' }],
+      ['a platform with no service support', null],
+    ])('is simply locked by another process with %s', async (_what, service) => {
+      expect(await labelled(service)).toBe('connection: locked by another process');
+    });
+  });
+
   it('labels only the store lock as the daemon, and shows other connection states as they are', async () => {
     const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
     const dir = await fixturesWith({ 'doctor.json': '{"success":true,"data":{"store_dir":"__STORE_DIR__","lock_held":false,"authenticated":true,"session_revoked":false,"connected":true,"connection_state":"connected","fts_enabled":true},"error":null}\n' });
     try {
       const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_FIXTURES: dir, FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
-      const text = formatDoctor(await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date() }));
-      expect(text).toContain('connection: connected');
-      expect(text).not.toContain('in use by the daemon');
+      const running = { install: async () => '', uninstall: async () => {}, status: async () => ({ installed: true, running: true, detail: 'installed, running' }) };
+      for (const service of [null, running]) {
+        const text = formatDoctor(await collectDoctor({ runner, policyFile: paths.policyFile, paths, service, now: () => new Date() }));
+        expect(text).toContain('connection: connected');
+        expect(text).not.toContain('in use by the daemon');
+        expect(text).not.toContain('locked by another process');
+      }
     } finally {
       await removeTmp(dir);
     }

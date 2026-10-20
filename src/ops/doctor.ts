@@ -83,10 +83,12 @@ export async function collectDoctor(opts: { runner: Runner; policyFile: string; 
 
 export function formatDoctor(r: DoctorReport): string {
   const s = r.status;
+  // wacli says the store is locked by some other process. That is the daemon, and expected, only when the service is known to be running.
+  const locked = r.service?.running === true ? 'in use by the daemon (expected)' : 'locked by another process';
   const lines = [
     `wacli: ${s.wacli_version ?? 'not found'} (${r.wacli_bin})${s.wacli_version && !s.min_version_ok ? ' below minimum' : ''}`,
     `paired: ${s.authenticated ? `yes${s.phone ? ` (${s.phone})` : ''}` : 'no'}`,
-    `connection: ${s.connection_state === 'locked_by_other_process' ? 'in use by the daemon (expected)' : (s.connection_state ?? 'unknown')}`,
+    `connection: ${s.connection_state === 'locked_by_other_process' ? locked : (s.connection_state ?? 'unknown')}`,
     `last sync: ${s.last_sync_at ?? 'unknown'}`,
     `last activity: ${s.heartbeat_at ? `${s.heartbeat_at} (${s.heartbeat_age_seconds}s ago)` : 'none'}`,
     `daemon service: ${r.service ? r.service.detail : 'not supported on this platform'}`,
