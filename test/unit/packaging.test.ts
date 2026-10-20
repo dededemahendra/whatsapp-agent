@@ -236,7 +236,8 @@ describe('README', () => {
     const readme = await read('README.md');
     const row = readme.split('\n').find((l) => l.startsWith('| `WHATSAPP_AGENT_LOG` |'));
     expect(row, 'the WHATSAPP_AGENT_LOG row').toBeDefined();
-    expect(flat(row!)).toContain('Debug lines print only at that level, and one warning line is printed on stderr whenever a sent row cannot be written to the audit log, at any level.');
+    // The cell ends without a full stop, like the cells above it.
+    expect(flat(row!)).toContain('Debug lines print only at that level, and one warning line is printed on stderr whenever a sent row cannot be written to the audit log, at any level |');
     expect(row).toContain('never message text');
     expect(row!.match(/\|/g)).toHaveLength(3); // still a two-cell table row
   });
