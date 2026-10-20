@@ -2,7 +2,7 @@ import { chmod, copyFile, mkdir, realpath, symlink, writeFile } from 'node:fs/pr
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AgentError } from '../../src/errors.js';
-import type { Policy } from '../../src/policy/schema.js';
+import { savePolicy, type Policy } from '../../src/policy/schema.js';
 import { createRunner, SEND_UNCERTAIN } from '../../src/wacli/runner.js';
 import { FAKE_WACLI, fakeEnv, fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
 import { errorOf, makeHarness, stubWrite, type Harness } from '../helpers/harness.js';
@@ -689,5 +689,199 @@ describe('send_file hands wacli the file it vetted', () => {
     } finally {
       await removeTmp(outbox);
     }
+  });
+});
+
+describe('unlisted mode', () => {
+  const unlisted = (allow: string[]) => enabled({ confirm: 'unlisted', allow, rateLimit: { perHour: 50, minGapSeconds: 0 } });
+
+  it('prompts for a recipient who is not on the allowlist, and sends only after the person says yes', async () => {
+    h = await makeHarness({ policy: unlisted(['+61 400 000 002']) });
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBeFalsy();
+    expect(h.elicitations).toHaveLength(1);
+    expect(await sendArgv()).toHaveLength(1);
+  });
+
+  it('does not send when that prompt is declined', async () => {
+    h = await makeHarness({ policy: unlisted([]), elicit: () => ({ action: 'decline' }) });
+    expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('confirmation_declined');
+    expect(await sendArgv()).toHaveLength(0);
+  });
+
+  it('does not prompt for an allowlisted recipient, whichever way the entry is written', async () => {
+    for (const entry of ['+61 400 000 001', '61400000001', '61400000001@s.whatsapp.net', '+61400000001:7@s.whatsapp.net']) {
+      h = await makeHarness({ policy: unlisted([entry]), elicitation: 'none' });
+      const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+      expect(r.isError, entry).toBeFalsy();
+      expect(h.elicitations).toHaveLength(0);
+      await h.close();
+    }
+  });
+
+  it('never lets an entry that is only a name match, so the prompt still appears', async () => {
+    h = await makeHarness({ policy: unlisted(['Alice', 'alice', 'Alice Example']) });
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBeFalsy();
+    expect(h.elicitations).toHaveLength(1);
+    await h.close();
+
+    h = await makeHarness({ policy: unlisted(['Alice']), elicitation: 'none' });
+    expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('confirmation_unavailable');
+    expect(await sendArgv()).toHaveLength(0);
+  });
+});
+
+describe('recipients that cannot receive a write', () => {
+  const targets: Array<[string, string]> = [['a channel', '120363000000000009@newsletter'], ['the status broadcast list', 'status@broadcast']];
+  const calls = (to: string): Array<[string, Record<string, unknown>, string]> => [
+    ['send_text', { to, message: 'hello' }, 'send text'],
+    ['react', { chat: to, message_id: 'MSG1', reaction: '👍' }, 'send react'],
+  ];
+
+  it.each(targets)('refuses %s as unsupported_target, whatever the confirm mode, and sends nothing', async (_what, jid) => {
+    for (const confirm of ['never', 'always'] as const) {
+      h = await makeHarness({ policy: enabled({ confirm }) });
+      for (const [tool, args, key] of calls(jid)) {
+        const r = await h.call(tool, args);
+        expect(r.isError, `${tool} ${confirm}`).toBe(true);
+        expect(errorOf(r), `${tool} ${confirm}`).toMatchObject({ error: 'unsupported_target', message: expect.stringContaining('read-only') });
+        expect((await h.argv()).filter((x) => x.key === key)).toHaveLength(0);
+      }
+      expect(h.elicitations).toHaveLength(0);
+      expect(h.audits.map((a) => a.reason)).toEqual(['unsupported_target', 'unsupported_target']);
+      expect(h.audits.every((a) => a.outcome === 'denied')).toBe(true);
+      await h.close();
+    }
+  });
+
+  it('records the kind of the target it refused', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    await h.call('send_text', { to: 'status@broadcast', message: 'hello' });
+    await h.call('send_text', { to: '120363000000000009@newsletter', message: 'hello' });
+    expect(h.audits.map((a) => a.kind)).toEqual(['broadcast', 'channel']);
+  });
+});
+
+describe('mark_read with writes switched off', () => {
+  it('is refused as writes_disabled and reaches nothing', async () => {
+    h = await makeHarness();
+    const r = await h.call('mark_read', { chat: 'Alice' });
+    expect(r.isError).toBe(true);
+    expect(errorOf(r)).toMatchObject({ error: 'writes_disabled' });
+    expect(await h.argv()).toEqual([]);
+    expect(h.audits).toEqual([expect.objectContaining({ tool: 'mark_read', outcome: 'denied', reason: 'writes_disabled' })]);
+  });
+});
+
+describe('send_file and links that leave the folder', () => {
+  it('refuses a file link pointing outside the root, and a link to a folder outside it', async () => {
+    const outbox = await makeTmp('wa-outbox-');
+    const elsewhere = await makeTmp('wa-elsewhere-');
+    try {
+      const secret = path.join(elsewhere, 'secret.txt');
+      await writeFile(secret, 'secret');
+      await symlink(secret, path.join(outbox, 'innocent.txt'));
+      await symlink(elsewhere, path.join(outbox, 'folder'));
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox] }) });
+      for (const target of [path.join(outbox, 'innocent.txt'), path.join(outbox, 'folder', 'secret.txt'), secret, path.join(outbox, '..', path.basename(elsewhere), 'secret.txt')]) {
+        const r = await h.call('send_file', { to: 'Alice', path: target });
+        expect(errorOf(r), target).toMatchObject({ error: 'file_outside_roots' });
+      }
+      expect((await h.argv()).filter((x) => x.key === 'send file')).toHaveLength(0);
+      expect(h.audits.every((a) => a.outcome === 'denied' && a.reason === 'file_outside_roots')).toBe(true);
+    } finally {
+      await removeTmp(outbox);
+      await removeTmp(elsewhere);
+    }
+  });
+
+  it('refuses a path that does not exist', async () => {
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox] }) });
+      expect(errorOf(await h.call('send_file', { to: 'Alice', path: path.join(outbox, 'missing.pdf') })).error).toBe('file_outside_roots');
+    } finally {
+      await removeTmp(outbox);
+    }
+  });
+});
+
+describe('the policy file on disk', () => {
+  const onDisk = (over: Partial<Policy['writes']> = {}) => (p: Policy): Policy => ({ ...p, writes: { ...p.writes, rateLimit: { perHour: 50, minGapSeconds: 0 }, ...over } });
+
+  it('takes effect on the next call, without a restart', async () => {
+    h = await makeHarness({ onDisk: true, policy: onDisk() });
+    expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'one' })).error).toBe('writes_disabled');
+
+    await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: true, confirm: 'never' })(h.deps.startupPolicy));
+    expect((await h.call('send_text', { to: 'Alice', message: 'two' })).isError).toBeFalsy();
+    expect(await sendArgv()).toHaveLength(1);
+
+    await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: false })(h.deps.startupPolicy));
+    expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'three' })).error).toBe('writes_disabled');
+    expect(await sendArgv()).toHaveLength(1);
+  });
+
+  it('turns a policy file that has become corrupt into an error with an audit row on every call, and sends nothing', async () => {
+    h = await makeHarness({ onDisk: true, policy: onDisk({ enabled: true, confirm: 'never' }) });
+    expect((await h.call('send_text', { to: 'Alice', message: 'fine' })).isError).toBeFalsy();
+    const before = h.audits.length;
+
+    await writeFile(h.deps.paths.policyFile, '{"version":1,');
+    for (const tool of [['send_text', { to: 'Alice', message: 'x' }], ['react', { chat: 'Alice', message_id: 'MSG1', reaction: '👍' }], ['mark_read', { chat: 'Alice' }]] as const) {
+      const r = await h.call(tool[0], tool[1]);
+      expect(r.isError, tool[0]).toBe(true);
+      expect(errorOf(r), tool[0]).toMatchObject({ error: 'invalid_input', message: expect.stringContaining('is not valid JSON') });
+      expect(errorOf(r).message, tool[0]).toContain('Run whatsapp-agent doctor.');
+    }
+    expect(await sendArgv()).toHaveLength(1);
+    expect((await h.argv()).filter((x) => x.key === 'send react' || x.key === 'chats mark-read')).toHaveLength(0);
+    expect(h.audits.slice(before)).toHaveLength(3);
+    expect(h.audits.slice(before).every((a) => a.outcome === 'failed' && a.reason === 'invalid_input' && a.to_jid === null)).toBe(true);
+
+    await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: true, confirm: 'never' })(h.deps.startupPolicy));
+    expect((await h.call('send_text', { to: 'Alice', message: 'back' })).isError).toBeFalsy();
+  });
+
+  it('refuses every write while the file has a value the schema rejects', async () => {
+    h = await makeHarness({ onDisk: true, policy: onDisk({ enabled: true, confirm: 'never' }) });
+    await writeFile(h.deps.paths.policyFile, JSON.stringify({ ...h.deps.startupPolicy, writes: { ...h.deps.startupPolicy.writes, confirm: 'sometimes' } }));
+    const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'x' }));
+    expect(e).toMatchObject({ error: 'invalid_input', message: expect.stringContaining('is invalid') });
+    expect(await sendArgv()).toHaveLength(0);
+  });
+});
+
+describe('input limits on write tools', () => {
+  it('refuses a message over maxMessageChars and a caption over it, and accepts exactly the limit', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never', rateLimit: { perHour: 50, minGapSeconds: 0 } }) });
+    const max = h.deps.startupPolicy.limits.maxMessageChars;
+    expect(max).toBe(4000);
+    const over = await h.call('send_text', { to: 'Alice', message: 'x'.repeat(max + 1) });
+    expect(over.isError).toBe(true);
+    expect(await sendArgv()).toHaveLength(0);
+    expect(h.audits).toEqual([]);
+    expect((await h.call('send_text', { to: 'Alice', message: 'x'.repeat(max) })).isError).toBeFalsy();
+    expect(await sendArgv()).toHaveLength(1);
+    expect((await h.call('send_file', { to: 'Alice', path: '/tmp/none.pdf', caption: 'x'.repeat(max + 1) })).isError).toBe(true);
+  });
+
+  it('follows a lower maxMessageChars in the policy', async () => {
+    h = await makeHarness({ policy: (p) => ({ ...enabled({ confirm: 'never' })(p), limits: { ...p.limits, maxMessageChars: 10 } }) });
+    expect((await h.call('send_text', { to: 'Alice', message: 'x'.repeat(11) })).isError).toBe(true);
+    expect((await h.call('send_text', { to: 'Alice', message: 'x'.repeat(10) })).isError).toBeFalsy();
+  });
+
+  it('refuses more than 20 mentions and accepts 20', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never', rateLimit: { perHour: 50, minGapSeconds: 0 } }) });
+    const mention = (i: number) => `+6140000${String(i).padStart(4, '0')}`;
+    const twentyOne = await h.call('send_text', { to: 'Alice', message: 'hi', mentions: Array.from({ length: 21 }, (_, i) => mention(i)) });
+    expect(twentyOne.isError).toBe(true);
+    expect(await sendArgv()).toHaveLength(0);
+    const twenty = await h.call('send_text', { to: 'Alice', message: 'hi', mentions: Array.from({ length: 20 }, (_, i) => mention(i)) });
+    expect(twenty.isError).toBeFalsy();
+    const [send] = await sendArgv();
+    expect(send!.argv.filter((a) => a.startsWith('--mention='))).toHaveLength(20);
   });
 });

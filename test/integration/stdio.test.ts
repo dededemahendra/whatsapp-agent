@@ -219,4 +219,65 @@ describe('whatsapp-agent mcp over stdio', () => {
       }
     });
   });
+
+  describe('what the server writes', () => {
+    const ALICE = '61400000001@s.whatsapp.net';
+    const SECRET = 'MAGIC-BODY-7731';
+    const FIXTURE_TEXT = ['Lunch tomorrow?', 'See you then', 'Free tomorrow?'];
+
+    /** A session that touches every kind of tool: status, a list, messages, a search, context, and a send. */
+    async function session(env: Record<string, string>): Promise<ReturnType<typeof spawnCli>> {
+      const cli = spawnCli(env);
+      await cli.initialize();
+      await cli.request('tools/list');
+      const calls: Array<[string, Record<string, unknown>]> = [
+        ['whatsapp_status', {}],
+        ['list_chats', {}],
+        ['read_messages', { chat: ALICE }],
+        ['search_messages', { query: 'lunch' }],
+        ['get_message_context', { chat: ALICE, message_id: 'MSG1' }],
+        ['send_text', { to: ALICE, message: SECRET }],
+      ];
+      for (const [name, args] of calls) {
+        const r = await cli.request('tools/call', { name, arguments: args });
+        expect(r.error, name).toBeUndefined();
+      }
+      cli.child.kill('SIGTERM');
+      expect((await within(cli.exited, 8000, 'the server to exit')).code).toBe(0);
+      return cli;
+    }
+
+    it('puts nothing but JSON-RPC messages on stdout, and nothing at all on stderr by default', async () => {
+      const dir = await makeTmp('wa-hygiene-');
+      try {
+        const { env } = await writableEnv(dir);
+        const cli = await session(env);
+        expect(cli.stdoutLines.length).toBeGreaterThanOrEqual(8);
+        for (const line of cli.stdoutLines) {
+          const m = JSON.parse(line) as { jsonrpc?: string; id?: unknown; method?: unknown; result?: unknown; error?: unknown };
+          expect(m.jsonrpc, line).toBe('2.0');
+          expect(m.method !== undefined || m.id !== undefined, line).toBe(true);
+        }
+        expect(cli.stderr()).toBe('');
+      } finally {
+        await removeTmp(dir);
+      }
+    });
+
+    it('prints no message text on stderr with debug logging on, only metadata', async () => {
+      const dir = await makeTmp('wa-debuglog-');
+      try {
+        const { env } = await writableEnv(dir);
+        const cli = await session({ ...env, WHATSAPP_AGENT_LOG: 'debug' });
+        const err = cli.stderr();
+        expect(err).toContain('[whatsapp-agent] wacli');
+        expect(err).toContain('"command":"send text"');
+        for (const text of [SECRET, ...FIXTURE_TEXT]) expect(err, text).not.toContain(text);
+        expect(err).not.toContain('--message');
+        for (const line of cli.stdoutLines) JSON.parse(line);
+      } finally {
+        await removeTmp(dir);
+      }
+    });
+  });
 });

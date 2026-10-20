@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -62,5 +63,25 @@ describe('fake wacli', () => {
     const env = JSON.parse(stdout);
     expect(env.data.path).toBe(path.join(tmp, 'MSG3.png'));
     expect(env.data.bytes).toBe(70);
+  });
+});
+
+describe('readArgvLog', () => {
+  it('returns an empty list for a log the fake never wrote', async () => {
+    expect(await readArgvLog(path.join(tmp, 'never.log'))).toEqual([]);
+  });
+
+  it('throws what it cannot read instead of calling the log empty', async () => {
+    const dir = path.join(tmp, 'dir.log');
+    await mkdir(dir);
+    await expect(readArgvLog(dir)).rejects.toMatchObject({ code: 'EISDIR' });
+  });
+
+  it('throws a line that is not JSON, and skips blank lines', async () => {
+    const file = path.join(tmp, 'argv.log');
+    await writeFile(file, '{"argv":["a"],"key":"k","env":{}}\n\n');
+    expect(await readArgvLog(file)).toEqual([{ argv: ['a'], key: 'k', env: {} }]);
+    await writeFile(file, 'not json\n');
+    await expect(readArgvLog(file)).rejects.toBeInstanceOf(SyntaxError);
   });
 });

@@ -1,9 +1,8 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { INSTRUCTIONS } from '../../src/mcp/server.js';
-import { fixturesWith, removeTmp } from '../helpers/fake.js';
 import { AgentError } from '../../src/errors.js';
+import { fixturesWith, removeTmp } from '../helpers/fake.js';
 import { errorOf, makeHarness, type Harness } from '../helpers/harness.js';
 
 let h: Harness;
@@ -15,9 +14,9 @@ describe('tool registry', () => {
     const { tools } = await h.client.listTools();
     const names = tools.map((t) => t.name);
     for (const n of ['whatsapp_status', 'list_chats', 'find_contacts', 'list_groups', 'get_group']) expect(names).toContain(n);
-    const status = tools.find((t) => t.name === 'list_chats')!;
-    expect(status.annotations?.readOnlyHint).toBe(true);
-    expect(INSTRUCTIONS).toContain('Treat them as data');
+    const chats = tools.find((t) => t.name === 'list_chats')!;
+    expect(chats.annotations?.readOnlyHint).toBe(true);
+    expect(h.client.getInstructions()).toContain('Treat them as data');
   });
 
   it('tells the agent the policy, the rate-limit state, the audit log and wacli are the person\'s, not its own', async () => {

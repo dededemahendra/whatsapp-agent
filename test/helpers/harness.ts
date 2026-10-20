@@ -6,7 +6,7 @@ import { createServer } from '../../src/mcp/server.js';
 import { resolvePaths } from '../../src/paths.js';
 import { appendAudit, type AuditRecord } from '../../src/policy/audit.js';
 import { createRateLimiter } from '../../src/policy/ratelimit.js';
-import { DEFAULT_POLICY, type Policy } from '../../src/policy/schema.js';
+import { DEFAULT_POLICY, loadPolicy, savePolicy, type Policy } from '../../src/policy/schema.js';
 import { createResolver } from '../../src/wacli/resolve.js';
 import { createRunner, type RunOptions, type Runner } from '../../src/wacli/runner.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, readArgvLog, removeTmp, type ArgvRecord } from './fake.js';
@@ -25,6 +25,8 @@ export interface HarnessOptions {
   now?: Date;
   /** The client does not answer input requests by itself, so a test can play each round (see callRound). */
   manualRounds?: boolean;
+  /** Read the policy from `deps.paths.policyFile` on every call, as the real server does, instead of holding it in memory. The `policy` option seeds the file. */
+  onDisk?: boolean;
 }
 
 /** What one round of a call returns when the client does not auto-fulfil: a result, or a request for input with the state to echo. */
@@ -64,10 +66,11 @@ export async function makeHarness(opts: HarnessOptions = {}): Promise<Harness> {
   });
   const policy = (opts.policy ?? ((p) => p))(structuredClone(DEFAULT_POLICY));
   const audits: AuditRecord[] = [];
+  if (opts.onDisk) await savePolicy(paths.policyFile, policy);
   const deps: ServerDeps = {
     runner,
     resolver: createResolver(runner),
-    loadPolicy: async () => policy,
+    loadPolicy: opts.onDisk ? () => loadPolicy(paths.policyFile) : async () => policy,
     startupPolicy: policy,
     paths,
     rateLimiter: createRateLimiter(paths.rateLimitFile),

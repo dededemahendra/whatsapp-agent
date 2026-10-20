@@ -37,11 +37,14 @@ export function fakeEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return { ...env, FAKE_WACLI_FIXTURES: FIXTURES, ...extra };
 }
 
+/** The calls the fake logged. A log that was never written is an empty list; any other failure to read it is a problem with the test, so it is thrown. */
 export async function readArgvLog(file: string): Promise<ArgvRecord[]> {
+  let text: string;
   try {
-    const text = await readFile(file, 'utf8');
-    return text.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l) as ArgvRecord);
-  } catch {
-    return [];
+    text = await readFile(file, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw e;
   }
+  return text.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l) as ArgvRecord);
 }
