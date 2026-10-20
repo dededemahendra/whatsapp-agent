@@ -1016,6 +1016,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 `test/unit/runner.test.ts`:
 
 ```ts
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AgentError } from '../../src/errors.js';
@@ -1072,6 +1073,17 @@ describe('createRunner against the fake wacli', () => {
     await expect(failing.read(['doctor'])).rejects.toMatchObject({
       code: 'wacli_error',
       message: expect.not.stringContaining('may have gone through'),
+    });
+  });
+
+  it('marks a write whose envelope reports failure as outcome-uncertain', async () => {
+    const dir = path.join(tmp, 'fixtures');
+    await mkdir(dir);
+    await writeFile(path.join(dir, 'send_text.json'), '{"success":false,"data":null,"error":"stale session"}\n');
+    await expect(runner({ FAKE_WACLI_FIXTURES: dir }).write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.stringContaining('stale session. The outcome is uncertain'),
+      details: expect.objectContaining({ outcome_uncertain: true }),
     });
   });
 
@@ -1283,7 +1295,8 @@ export function classifyFailure(code: number, stdout: string, stderr: string): A
 
 function markUncertain(err: AgentError): AgentError {
   if (err.code !== 'wacli_error' && err.code !== 'timeout') return err;
-  const message = err.message.includes('may have gone through') ? err.message : `${err.message} ${SEND_UNCERTAIN}`;
+  const base = err.message.replace(/[\s.]+$/, '');
+  const message = err.message.includes('may have gone through') ? err.message : `${base}. ${SEND_UNCERTAIN}`;
   return new AgentError(err.code, message, { ...err.details, outcome_uncertain: true });
 }
 
@@ -1310,7 +1323,11 @@ export function createRunner(cfg: RunnerConfig): Runner {
       const err = classifyFailure(r.code, r.stdout, r.stderr);
       throw mode === 'write' ? markUncertain(err) : err;
     }
-    return parseEnvelope<T>(r.stdout, r.stderr);
+    try {
+      return parseEnvelope<T>(r.stdout, r.stderr);
+    } catch (e) {
+      throw mode === 'write' && e instanceof AgentError ? markUncertain(e) : e;
+    }
   }
 
   return {
@@ -1328,7 +1345,7 @@ export function createRunner(cfg: RunnerConfig): Runner {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/runner.test.ts && pnpm typecheck`
-Expected: PASS (17 tests). The timeout test takes about 0.3 s; the oversized-output test about 1 s.
+Expected: PASS (18 tests). The timeout test takes about 0.3 s; the oversized-output test about 1 s.
 
 - [ ] **Step 5: Commit**
 
