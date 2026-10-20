@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { CallToolResult, InputRequiredResult, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { AgentError, toToolError } from '../../errors.js';
-import { debug } from '../../log.js';
+import { debug, warn } from '../../log.js';
 import { auditInput, type AuditRecord } from '../../policy/audit.js';
 import { DENY_MESSAGES, decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
 import type { Policy } from '../../policy/schema.js';
@@ -107,13 +107,14 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
 
   /**
    * Rows for denials, failures and the sent row: the result already says what happened, and a delivered send is reported as sent whatever
-   * becomes of its row, so a row that cannot be written is logged and nothing else changes. (The logger has one level, debug.)
+   * becomes of its row, so a row that cannot be written is logged and nothing else changes. A lost sent row is a warning, shown whatever the
+   * log setting: the audit log is left with an attempted row and nothing after it. A lost denied or failed row is only a debug line.
    */
   async function record(rec: AuditRecord): Promise<void> {
     try {
       await deps.audit(rec);
     } catch (e) {
-      debug(unwritable(e), { tool: rec.tool, outcome: rec.outcome });
+      (rec.outcome === 'sent' ? warn : debug)(unwritable(e), { tool: rec.tool, outcome: rec.outcome });
     }
   }
 

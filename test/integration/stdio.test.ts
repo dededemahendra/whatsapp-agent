@@ -225,8 +225,21 @@ describe('whatsapp-agent mcp over stdio', () => {
     const SECRET = 'MAGIC-BODY-7731';
     const FIXTURE_TEXT = ['Lunch tomorrow?', 'See you then', 'Free tomorrow?'];
 
-    /** A session that touches every kind of tool: status, a list, messages, a search, context, and a send. */
-    async function session(env: Record<string, string>): Promise<ReturnType<typeof spawnCli>> {
+    /** Every line the server wrote to stdout is a JSON-RPC message, and nothing else is there. */
+    function expectJsonRpcOnly(lines: string[]): void {
+      expect(lines.length).toBeGreaterThan(0);
+      for (const line of lines) {
+        const m = JSON.parse(line) as { jsonrpc?: string; id?: unknown; method?: unknown };
+        expect(m.jsonrpc, line).toBe('2.0');
+        expect(m.method !== undefined || m.id !== undefined, line).toBe(true);
+      }
+    }
+
+    /**
+     * A session that touches every kind of tool: status, a list, messages, a search, context, and a send. With `loseSentRow`, the audit log is
+     * swapped for a directory while the send is under way (the fake writes its argv before it sleeps), so the sent row cannot be appended.
+     */
+    async function session(env: Record<string, string>, loseSentRow?: { log: string; audit: string }): Promise<ReturnType<typeof spawnCli>> {
       const cli = spawnCli(env);
       await cli.initialize();
       await cli.request('tools/list');
@@ -239,8 +252,15 @@ describe('whatsapp-agent mcp over stdio', () => {
         ['send_text', { to: ALICE, message: SECRET }],
       ];
       for (const [name, args] of calls) {
-        const r = await cli.request('tools/call', { name, arguments: args });
+        const pending = cli.request('tools/call', { name, arguments: args });
+        if (loseSentRow && name === 'send_text') {
+          await waitFor(async () => (await readArgvLog(loseSentRow.log)).some((r) => r.key === 'send text'), { what: 'the write to reach wacli' });
+          await rm(loseSentRow.audit);
+          await mkdir(loseSentRow.audit);
+        }
+        const r = await within(pending, 15_000, `the result of ${name}`);
         expect(r.error, name).toBeUndefined();
+        if (name === 'send_text') expect(r.result, name).toMatchObject({ structuredContent: { sent: true, message_id: '3EB0SENT0001' } });
       }
       cli.child.kill('SIGTERM');
       expect((await within(cli.exited, 8000, 'the server to exit')).code).toBe(0);
@@ -253,22 +273,19 @@ describe('whatsapp-agent mcp over stdio', () => {
         const { env } = await writableEnv(dir);
         const cli = await session(env);
         expect(cli.stdoutLines.length).toBeGreaterThanOrEqual(8);
-        for (const line of cli.stdoutLines) {
-          const m = JSON.parse(line) as { jsonrpc?: string; id?: unknown; method?: unknown; result?: unknown; error?: unknown };
-          expect(m.jsonrpc, line).toBe('2.0');
-          expect(m.method !== undefined || m.id !== undefined, line).toBe(true);
-        }
+        expectJsonRpcOnly(cli.stdoutLines);
         expect(cli.stderr()).toBe('');
       } finally {
         await removeTmp(dir);
       }
     });
 
-    it('logs a sent row that cannot be written, and still reports the send as sent', async () => {
+    it('warns on stderr when a sent row cannot be written, without any debug flag, and still reports the send as sent', async () => {
       const dir = await makeTmp('wa-auditlog-');
       try {
         const { env, log } = await writableEnv(dir, { sleepMs: 700 });
-        const cli = spawnCli({ ...env, WHATSAPP_AGENT_LOG: 'debug' });
+        expect(env.WHATSAPP_AGENT_LOG).toBeUndefined();
+        const cli = spawnCli(env);
         await cli.initialize();
         const call = cli.request('tools/call', { name: 'send_text', arguments: { to: ALICE, message: SECRET } });
         // The fake writes its argv before it sleeps, so by now the attempted row is in the audit log and the send is under way.
@@ -284,10 +301,13 @@ describe('whatsapp-agent mcp over stdio', () => {
 
         cli.child.kill('SIGTERM');
         expect((await within(cli.exited, 8000, 'the server to exit')).code).toBe(0);
-        const err = cli.stderr();
-        expect(err).toContain(`[whatsapp-agent] Could not write the audit log at ${audit}: `);
-        expect(err).toContain('EISDIR');
-        expect(err).not.toContain(SECRET);
+        const lines = cli.stderr().split('\n').filter((l) => l !== '');
+        expect(lines).toHaveLength(1);
+        expect(lines[0]!.startsWith(`[whatsapp-agent] Could not write the audit log at ${audit}: `)).toBe(true);
+        expect(lines[0]).toContain('EISDIR');
+        expect(lines[0]!.endsWith(' {"tool":"send_text","outcome":"sent"}')).toBe(true);
+        expect(cli.stderr()).not.toContain(SECRET);
+        expectJsonRpcOnly(cli.stdoutLines);
       } finally {
         await removeTmp(dir);
       }
@@ -303,7 +323,30 @@ describe('whatsapp-agent mcp over stdio', () => {
         expect(err).toContain('"command":"send text"');
         for (const text of [SECRET, ...FIXTURE_TEXT]) expect(err, text).not.toContain(text);
         expect(err).not.toContain('--message');
-        for (const line of cli.stdoutLines) JSON.parse(line);
+        expectJsonRpcOnly(cli.stdoutLines);
+      } finally {
+        await removeTmp(dir);
+      }
+    });
+
+    it.each([
+      { label: 'by default', flag: undefined },
+      { label: 'with debug logging on', flag: 'debug' },
+    ])('prints no message text on stderr when a sent row is lost either, $label', async ({ flag }) => {
+      const dir = await makeTmp('wa-warnlog-');
+      try {
+        const { env, log } = await writableEnv(dir, { sleepMs: 300 });
+        const audit = path.join(dir, 'data', 'audit.jsonl');
+        const cli = await session(flag ? { ...env, WHATSAPP_AGENT_LOG: flag } : env, { log, audit });
+        const err = cli.stderr();
+        const warning = `[whatsapp-agent] Could not write the audit log at ${audit}: `;
+        expect(err.split(warning)).toHaveLength(2); // exactly one such line
+        expect(err).toContain('EISDIR');
+        for (const text of [SECRET, ...FIXTURE_TEXT]) expect(err, text).not.toContain(text);
+        expect(err).not.toContain('--message');
+        if (flag === undefined) expect(err.split('\n').filter((l) => l !== '')).toHaveLength(1);
+        else expect(err).toContain('"command":"send text"');
+        expectJsonRpcOnly(cli.stdoutLines);
       } finally {
         await removeTmp(dir);
       }

@@ -1,14 +1,18 @@
 import { chmod, copyFile, mkdir, realpath, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentError } from '../../src/errors.js';
 import { savePolicy, type Policy } from '../../src/policy/schema.js';
 import { createRunner, SEND_UNCERTAIN } from '../../src/wacli/runner.js';
 import { FAKE_WACLI, fakeEnv, fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
 import { errorOf, makeHarness, stubWrite, type Harness } from '../helpers/harness.js';
+import { captureStderr } from '../helpers/stderr.js';
 
 let h: Harness;
-afterEach(async () => { await h?.close(); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await h?.close();
+});
 
 const enabled = (over: Partial<Policy['writes']> = {}) => (p: Policy): Policy => ({ ...p, writes: { ...p.writes, enabled: true, ...over } });
 const sendArgv = async () => (await h.argv()).filter((r) => r.key === 'send text');
@@ -161,12 +165,16 @@ describe('send_text', () => {
       if (rec.outcome === 'attempted') return append(rec); // that row is written before wacli is reached, or nothing is sent
       throw new Error('ENOSPC: no space left on device');
     };
+    const err = captureStderr();
     const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
     expect(r.isError).toBeFalsy();
     expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0001', to: { jid: '61400000001@s.whatsapp.net' } });
     expect(JSON.stringify(r)).not.toMatch(/uncertain|audit/i);
     expect(await sendArgv()).toHaveLength(1);
     expect(h.audits.map((a) => a.outcome)).toEqual(['attempted']);
+    // The lost row is reported to the person on stderr, not to the agent, and the line carries no message text.
+    expect(err.lines()).toEqual([`[whatsapp-agent] Could not write the audit log at ${h.deps.paths.auditFile}: ENOSPC: no space left on device {"tool":"send_text","outcome":"sent"}`]);
+    expect(err.text()).not.toContain('hello');
   });
 
   it('reports an ambiguous recipient and a wacli failure as failed audits', async () => {
@@ -603,6 +611,7 @@ describe('a failure after the write has been handed to wacli is uncertain', () =
       if (rec.outcome === 'sent') throw new Error('ENOSPC');
       return write(rec);
     };
+    captureStderr();
     const marked = await h.call('mark_read', { chat: 'Alice' });
     expect(marked.isError).toBeFalsy();
     expect(marked.structuredContent).toMatchObject({ ok: true, chat: { jid: '61400000001@s.whatsapp.net' } });
@@ -630,21 +639,25 @@ describe('the sent row is best effort for every write', () => {
   it('still reports a reaction as sent', async () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
     failAfterAttempt(h);
+    const err = captureStderr();
     const r = await h.call('react', { chat: 'Alice', message_id: 'MSG1', reaction: '👍' });
     expect(r.isError).toBeFalsy();
     expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0003' });
     expect((await h.argv()).filter((x) => x.key === 'send react')).toHaveLength(1);
     expect(h.audits.map((a) => a.outcome)).toEqual(['attempted']);
+    expect(err.lines()).toEqual([`[whatsapp-agent] Could not write the audit log at ${h.deps.paths.auditFile}: EIO: i/o error {"tool":"react","outcome":"sent"}`]);
   });
 
   it('still reports a mark as read as made', async () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
     failAfterAttempt(h);
+    const err = captureStderr();
     const r = await h.call('mark_read', { chat: 'Alice' });
     expect(r.isError).toBeFalsy();
     expect(r.structuredContent).toMatchObject({ ok: true });
     expect((await h.argv()).filter((x) => x.key === 'chats mark-read')).toHaveLength(1);
     expect(h.audits.map((a) => a.outcome)).toEqual(['attempted']);
+    expect(err.lines()).toEqual([`[whatsapp-agent] Could not write the audit log at ${h.deps.paths.auditFile}: EIO: i/o error {"tool":"mark_read","outcome":"sent"}`]);
   });
 
   it('still reports a file as sent', async () => {
@@ -654,11 +667,14 @@ describe('the sent row is best effort for every write', () => {
       await writeFile(file, 'pdf');
       h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox] }) });
       failAfterAttempt(h);
+      const err = captureStderr();
       const r = await h.call('send_file', { to: 'Alice', path: file });
       expect(r.isError).toBeFalsy();
       expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0002' });
       expect((await h.argv()).filter((x) => x.key === 'send file')).toHaveLength(1);
       expect(h.audits.map((a) => a.outcome)).toEqual(['attempted']);
+      expect(err.lines()).toEqual([`[whatsapp-agent] Could not write the audit log at ${h.deps.paths.auditFile}: EIO: i/o error {"tool":"send_file","outcome":"sent"}`]);
+      expect(err.text()).not.toContain('report.pdf');
     } finally {
       await removeTmp(outbox);
     }
@@ -674,8 +690,50 @@ describe('the sent row is best effort for every write', () => {
   it('keeps the failed row best effort: a failure is still reported when its row is lost', async () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|usync failed' } });
     failAfterAttempt(h);
+    const err = captureStderr();
     expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('wacli_error');
     expect(h.audits.map((a) => a.outcome)).toEqual(['attempted']);
+    expect(err.text()).toBe('');
+  });
+
+  it('warns about nothing else: a lost denied row, failed row or attempted row says nothing on stderr by default', async () => {
+    h = await makeHarness();
+    h.deps.audit = async () => { throw new Error('ENOSPC: no space left on device'); };
+    const err = captureStderr();
+    expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('writes_disabled');
+    await h.close();
+
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    h.deps.audit = async () => { throw new Error('ENOSPC: no space left on device'); };
+    expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('invalid_input'); // the attempted row, and then the failed row, are lost
+    expect(errorOf(await h.call('send_text', { to: 'a', message: 'hello' })).error).toBe('ambiguous_recipient'); // a failed row before any lookup result
+    expect(err.text()).toBe('');
+  });
+
+  it('still reports a delivered send as sent when stderr itself cannot be written to', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    failAfterAttempt(h);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => { throw new Error('EPIPE: broken pipe'); });
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0001' });
+  });
+
+  it('still logs a lost denied or failed row when debug logging is on, with the same wording', async () => {
+    vi.stubEnv('WHATSAPP_AGENT_LOG', 'debug');
+    vi.resetModules();
+    try {
+      const fresh = await import('../helpers/harness.js');
+      h = await fresh.makeHarness();
+      h.deps.audit = async () => { throw new Error('ENOSPC: no space left on device'); };
+      const err = captureStderr();
+      expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('writes_disabled');
+      expect(err.lines()).toEqual([`[whatsapp-agent] Could not write the audit log at ${h.deps.paths.auditFile}: ENOSPC: no space left on device {"tool":"send_text","outcome":"denied"}`]);
+      expect(err.text()).not.toContain('hello');
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 });
 
