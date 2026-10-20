@@ -342,7 +342,8 @@ show a form, and the elicitation answer if this is a re-entry.
    `Deny(confirmation_unavailable)`.
 9. If needed and no accepted answer is present: `NeedsConfirmation`.
 10. If needed and the answer is declined, cancelled or unticked:
-    `Deny(confirmation_declined)`.
+    `Deny(confirmation_declined)`. A declined answer denies even when the
+    policy no longer needs a confirmation (A30).
 11. `Allow`.
 
 The function has no I/O. Rate-limit state and the client capability are
@@ -727,6 +728,9 @@ overrides the earlier text where they differ.
   be written is logged and the send is still reported as sent; the `attempted`
   row (A24) stays fail-closed.
 - A29. The MCP server serves both protocol eras through the SDK's `serveStdio`.
-  On SIGINT, SIGTERM or SIGHUP it closes the transport, waits up to 10 seconds
-  for writes in flight (from the policy gate to the audit append), then exits 0;
-  a second signal exits 130.
+  On SIGINT, SIGTERM or SIGHUP it closes the transport and waits for writes in
+  flight (from the policy gate to the audit append) within one 10 second budget,
+  then exits 0; a second signal exits 130.
+- A30. A declined confirmation denies the write even when the policy no longer
+  calls for a prompt (confirm set to never, or the recipient allowlisted since
+  the prompt). A decline never sends.

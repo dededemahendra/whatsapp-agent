@@ -252,17 +252,19 @@ describe('design spec', () => {
 
   const A27 = 'A27. Confirmation answers are bound to the request. The server mints a signed `requestState` for every confirmation prompt with the MCP SDK\'s request-state codec (a random per-process key, 300 second lifetime). Its payload names the kind of write, the resolved JID, the chat kind, a random nonce and a SHA-256 digest of every field that affects the send. An answer counts as acceptance only when the state verifies, its digest equals one recomputed from the current call, and its nonce has not been used before; anything else is no answer and the person is asked again. A state the SDK cannot verify, or one that has expired, is refused before the handler runs and nothing is sent. On the 2025 protocol the prompt is an elicitation answered in process and no state travels.';
   const A28 = 'A28. A failure after the write has been handed to wacli is reported as SEND_UNCERTAIN with `outcome_uncertain` true, and the audit row carries `uncertain` true with the reason suffixed "(outcome uncertain, may have been delivered)". Errors raised before the spawn or by wacli\'s flag parsing, and wacli\'s own definite verdicts (not paired, store locked, not found, too old), are reported as they are, because nothing was sent. A `sent` row that cannot be written is logged and the send is still reported as sent; the `attempted` row (A24) stays fail-closed.';
-  const A29 = 'A29. The MCP server serves both protocol eras through the SDK\'s `serveStdio`. On SIGINT, SIGTERM or SIGHUP it closes the transport, waits up to 10 seconds for writes in flight (from the policy gate to the audit append), then exits 0; a second signal exits 130.';
+  const A29 = 'A29. The MCP server serves both protocol eras through the SDK\'s `serveStdio`. On SIGINT, SIGTERM or SIGHUP it closes the transport and waits for writes in flight (from the policy gate to the audit append) within one 10 second budget, then exits 0; a second signal exits 130.';
+  const A30 = 'A30. A declined confirmation denies the write even when the policy no longer calls for a prompt (confirm set to never, or the recipient allowlisted since the prompt). A decline never sends.';
 
-  it('ends section 16 with amendments A27 to A29, in order, after A26', async () => {
+  it('ends section 16 with amendments A27 to A30, in order, after A26', async () => {
     const spec = await read(SPEC);
     const bullets = spec.slice(spec.indexOf('## 16. Amendments')).split(/\n(?=- A\d+\. )/).slice(1);
     const numbers = bullets.map((b) => /^- (A\d+)\./.exec(b)![1]);
-    expect(numbers.slice(-4)).toEqual(['A26', 'A27', 'A28', 'A29']);
+    expect(numbers.slice(-5)).toEqual(['A26', 'A27', 'A28', 'A29', 'A30']);
     expect(new Set(numbers).size).toBe(numbers.length);
-    expect(flat(bullets.at(-3)!)).toBe(`- ${A27}`);
-    expect(flat(bullets.at(-2)!)).toBe(`- ${A28}`);
-    expect(flat(bullets.at(-1)!)).toBe(`- ${A29}`);
+    expect(flat(bullets.at(-4)!)).toBe(`- ${A27}`);
+    expect(flat(bullets.at(-3)!)).toBe(`- ${A28}`);
+    expect(flat(bullets.at(-2)!)).toBe(`- ${A29}`);
+    expect(flat(bullets.at(-1)!)).toBe(`- ${A30}`);
   });
 
   it('wraps the new amendments like the ones before them: a dash, two spaces of indent, 80 columns', async () => {
@@ -285,7 +287,15 @@ describe('design spec', () => {
     expect(section5).not.toContain('a single round suffices');
   });
 
-  it('changes nothing else in sections 1 to 15 of the spec that A27 to A29 do not replace', async () => {
+  it('points the decline step of the decision algorithm at A30 in one added sentence', async () => {
+    const spec = await read(SPEC);
+    const algorithm = spec.slice(spec.indexOf('### Decision algorithm'), spec.indexOf('### Rate-limit state'));
+    const step10 = algorithm.slice(algorithm.indexOf('10. If needed'), algorithm.indexOf('11. '));
+    expect(flat(step10)).toBe('10. If needed and the answer is declined, cancelled or unticked: `Deny(confirmation_declined)`. A declined answer denies even when the policy no longer needs a confirmation (A30).');
+    expect(algorithm.match(/A30/g)).toHaveLength(1);
+  });
+
+  it('changes nothing else in sections 1 to 15 of the spec that A27 to A30 do not replace', async () => {
     const spec = await read(SPEC);
     expect(spec).toContain('The SDK\'s legacy shim serves pre-2026 clients that do');
     expect(spec).toContain('- A26. `daemon.staleThreshold` is at most 2 minutes (seconds up to 120, or `1m`');
