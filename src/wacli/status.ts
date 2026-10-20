@@ -5,16 +5,15 @@ import { meetsMinimum } from '../version.js';
 import type { Runner } from './runner.js';
 import { phoneFromJid, toIso, type WacliDoctor } from './shape.js';
 
-/** wacli's version is read once per runner (so once per process) and cached. */
-const versionCache = new WeakMap<Runner, Promise<string | null>>();
+/** wacli's version is read once per runner (so once per process) and cached, but only once it was read successfully. */
+const versionCache = new WeakMap<Runner, string>();
 
-export function cachedVersion(runner: Runner): Promise<string | null> {
-  let pending = versionCache.get(runner);
-  if (!pending) {
-    pending = runner.version();
-    versionCache.set(runner, pending);
-  }
-  return pending;
+export async function cachedVersion(runner: Runner): Promise<string | null> {
+  const cached = versionCache.get(runner);
+  if (cached !== undefined) return cached;
+  const version = await runner.version();
+  if (version !== null) versionCache.set(runner, version);
+  return version;
 }
 
 export interface StatusInfo {

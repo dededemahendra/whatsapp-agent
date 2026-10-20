@@ -42,6 +42,18 @@ describe('whatsapp_status', () => {
     const r = await h.call('whatsapp_status');
     expect(r.structuredContent).toMatchObject({ wacli_version: '0.21.0', min_version_ok: false });
   });
+
+  it('reads the wacli version once per process but retries while it is unknown', async () => {
+    h = await makeHarness();
+    await h.call('whatsapp_status');
+    await h.call('whatsapp_status');
+    expect((await h.argv()).filter((r) => r.key === 'version')).toHaveLength(1);
+    await h.close();
+    h = await makeHarness({ env: { FAKE_WACLI_VERSION: 'dev' } });
+    await h.call('whatsapp_status');
+    await h.call('whatsapp_status');
+    expect((await h.argv()).filter((r) => r.key === 'version')).toHaveLength(2);
+  });
 });
 
 describe('list_chats', () => {
