@@ -265,8 +265,7 @@ forward: allowlist the recipient and set `writes.confirm` to `unlisted`, or
 set it to `never`. The SDK's legacy shim serves pre-2026 clients that do
 support elicitation, so no separate code path is needed for them.
 
-No `requestState` is used in v1: a single round suffices and the client
-retries with identical arguments.
+A signed `requestState` binds each answer to its prompt (A27).
 
 ## 6. Policy
 
@@ -708,3 +707,26 @@ overrides the earlier text where they differ.
   replaced, 200 characters at most); other recognised events stay name-only.
 - A26. `daemon.staleThreshold` is at most 2 minutes (seconds up to 120, or `1m`
   or `2m`), and the validation message names the limit.
+- A27. Confirmation answers are bound to the request. The server mints a signed
+  `requestState` for every confirmation prompt with the MCP SDK's request-state
+  codec (a random per-process key, 300 second lifetime). Its payload names the
+  kind of write, the resolved JID, the chat kind, a random nonce and a SHA-256
+  digest of every field that affects the send. An answer counts as acceptance
+  only when the state verifies, its digest equals one recomputed from the
+  current call, and its nonce has not been used before; anything else is no
+  answer and the person is asked again. A state the SDK cannot verify, or one
+  that has expired, is refused before the handler runs and nothing is sent. On
+  the 2025 protocol the prompt is an elicitation answered in process and no
+  state travels.
+- A28. A failure after the write has been handed to wacli is reported as
+  SEND_UNCERTAIN with `outcome_uncertain` true, and the audit row carries
+  `uncertain` true with the reason suffixed "(outcome uncertain, may have been
+  delivered)". Errors raised before the spawn or by wacli's flag parsing, and
+  wacli's own definite verdicts (not paired, store locked, not found, too old),
+  are reported as they are, because nothing was sent. A `sent` row that cannot
+  be written is logged and the send is still reported as sent; the `attempted`
+  row (A24) stays fail-closed.
+- A29. The MCP server serves both protocol eras through the SDK's `serveStdio`.
+  On SIGINT, SIGTERM or SIGHUP it closes the transport, waits up to 10 seconds
+  for writes in flight (from the policy gate to the audit append), then exits 0;
+  a second signal exits 130.
