@@ -65,6 +65,11 @@ export const defaultSpawn: SpawnFn = (bin, args, env, timeoutMs) =>
           reject(new AgentError('wacli_error', 'wacli output exceeded 16 MiB. Narrow the query or lower the limit.'));
           return;
         }
+        if (typeof e.code === 'string') {
+          // A string code means the process never ran (EACCES, EPERM and the like); a number is an exit code.
+          reject(new AgentError('wacli_error', `Could not run wacli (${e.code}): ${e.message}`, { spawn_code: e.code }));
+          return;
+        }
         resolve({
           stdout: String(stdout ?? ''),
           stderr: String(stderr ?? ''),
@@ -174,6 +179,7 @@ export function classifyFailure(code: number, stdout: string, stderr: string): A
 
 function markUncertain(err: AgentError): AgentError {
   if (err.code !== 'wacli_error' && err.code !== 'timeout') return err;
+  if (err.details.spawn_code !== undefined) return err; // the process never started, so nothing was sent
   const base = err.message.replace(/[\s.]+$/, '');
   const message = err.message.includes('may have gone through') ? err.message : `${base}. ${SEND_UNCERTAIN}`;
   return new AgentError(err.code, message, { ...err.details, outcome_uncertain: true });

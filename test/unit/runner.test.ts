@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentError } from '../../src/errors.js';
@@ -85,6 +85,23 @@ describe('createRunner against the fake wacli', () => {
     expect(await codeOf(runner({ FAKE_WACLI_FAIL: '*|1|WhatsApp session was revoked: 401' }).read(['doctor']))).toBe('session_logged_out');
     const p = runner({ FAKE_WACLI_FAIL: '*|1|something odd happened' }).read(['doctor']);
     await expect(p).rejects.toMatchObject({ code: 'wacli_error', message: 'something odd happened', details: { stderr_tail: expect.stringContaining('something odd') } });
+  });
+
+  it('reports a binary that cannot be run as a spawn error, not as exit code 1, and never calls a write uncertain', async () => {
+    const copy = path.join(tmp, 'wacli-not-executable');
+    await copyFile(FAKE_WACLI, copy);
+    await chmod(copy, 0o644);
+    const r = createRunner({ bin: copy, baseEnv: fakeEnv() });
+    await expect(r.read(['doctor'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.stringMatching(/^Could not run wacli \(EACCES\): /),
+      details: { spawn_code: 'EACCES' },
+    });
+    const err = await r.write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi']).catch((e: unknown) => e) as AgentError;
+    expect(err).toMatchObject({ code: 'wacli_error', details: { spawn_code: 'EACCES' } });
+    expect(err.message).not.toContain('exited with code');
+    expect(err.message).not.toContain('may have gone through');
+    expect(err.details.outcome_uncertain).toBeUndefined();
   });
 
   it('reports a missing binary', async () => {
