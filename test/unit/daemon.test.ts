@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildSyncArgs, describeStderrLine, parseEventLine, startSupervisor } from '../../src/ops/daemon.js';
 import { DEFAULT_POLICY } from '../../src/policy/schema.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, removeTmp } from '../helpers/fake.js';
+import { waitFor } from '../helpers/wait.js';
 
 let tmp: string;
 beforeEach(async () => { tmp = await makeTmp(); });
@@ -67,12 +68,70 @@ describe('startSupervisor', () => {
     await expect(handle.done).resolves.toBe('stopped');
   });
 
+  it('logs an error event with its message sanitised', async () => {
+    const { handle, lines } = start('connected;error:send failed for 61400000001@s.whatsapp.net;sleep:30000');
+    await waitFor(() => lines.some((l) => l.endsWith('error: send failed for <jid>')), { what: 'the error event in the log' });
+    await handle.stop();
+    await handle.done;
+    expect(lines.join('\n')).not.toContain('61400000001');
+  });
+
   it('forwards non-JSON stderr lines to the log', async () => {
     const { handle, lines } = start('text;sleep:30000');
     await new Promise((r) => setTimeout(r, 400));
     await handle.stop();
     await handle.done;
     expect(lines.some((l) => l.endsWith('connected; history sync 12%'))).toBe(true);
+  });
+});
+
+describe('describeStderrLine structured lines', () => {
+  const errorEvent = (message: unknown) => JSON.stringify({ event: 'error', data: { message }, ts: 1 });
+
+  it('logs the sanitised message of an error event', () => {
+    expect(describeStderrLine(errorEvent('send failed: context deadline exceeded'))).toEqual({ text: 'error: send failed: context deadline exceeded', event: 'error' });
+  });
+
+  it('strips controls, replaces JIDs and runs of 8 or more digits, and caps the message at 200 characters', () => {
+    const raw = 'bad\u001b[31m for 61400000001@s.whatsapp.net and 120363000000000001@g.us:\u0007 call 0412345678 or 12345, id 61400000001:12@s.whatsapp.net';
+    expect(describeStderrLine(errorEvent(raw)).text).toBe('error: bad[31m for <jid> and <jid>: call <number> or 12345, id <jid>');
+    expect(describeStderrLine(errorEvent('x'.repeat(300))).text).toBe(`error: ${'x'.repeat(200)}`);
+    expect(describeStderrLine(errorEvent(`${'y'.repeat(190)} 61400000001@s.whatsapp.net`)).text).toBe(`error: ${'y'.repeat(190)} <jid>`);
+  });
+
+  it('falls back to the event name when an error event has no usable message', () => {
+    for (const data of [{}, { message: 42 }, { message: '' }, { message: '\u0007' }, null]) {
+      expect(describeStderrLine(JSON.stringify({ event: 'error', data, ts: 1 }))).toEqual({ text: 'event=error', event: 'error' });
+    }
+  });
+
+  it('keeps every other recognised event name-only, even when it carries a message', () => {
+    expect(describeStderrLine('{"event":"disconnected","data":{"message":"secret words"},"ts":1}')).toEqual({ text: 'event=disconnected', event: 'disconnected' });
+  });
+
+  it('logs a wacli failure envelope as a capped, sanitised error', () => {
+    const line = '{"success":false,"data":null,"error":"send text: usync failed for 61400000001@s.whatsapp.net\\u0007"}';
+    expect(describeStderrLine(line)).toEqual({ text: 'wacli error: send text: usync failed for <jid>', event: null });
+    expect(describeStderrLine(JSON.stringify({ success: false, data: null, error: 'z'.repeat(500) })).text).toBe(`wacli error: ${'z'.repeat(200)}`);
+  });
+
+  it('treats a success envelope, a failure without a string error, and other structured lines as placeholders', () => {
+    const placeholder = (line: string) => `(unrecognised json line, ${line.length} chars)`;
+    for (const line of [
+      '{"success":true,"data":{"Text":"secret"},"error":null}',
+      '{"success":false,"data":null,"error":{"code":5}}',
+      '[{"Text":"secret"}]',
+      '"secret words"',
+      '  ["secret words"]',
+      '2026/10/20 10:00:00 payload {"Text":"secret"}',
+    ]) {
+      expect(describeStderrLine(line).text).toBe(placeholder(line));
+    }
+  });
+
+  it('still logs plain lines, including ones with quotes that are not JSON', () => {
+    expect(describeStderrLine('connected; history sync 12%').text).toBe('connected; history sync 12%');
+    expect(describeStderrLine('time=1 msg="history sync" pct=12').text).toBe('time=1 msg="history sync" pct=12');
   });
 });
 

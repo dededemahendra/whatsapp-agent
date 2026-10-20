@@ -30,21 +30,58 @@ export function parseEventLine(line: string): { event: string; data?: unknown } 
 
 const EVENT_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
 const MAX_PLAIN_LINE = 500;
+const MAX_ERROR_MESSAGE = 200;
+const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e]/g;
+const JID = /(?<![\w.+-])\+?\d[\d:-]*@[A-Za-z0-9.-]+/g;
 
 function safeLine(line: string): string {
-  const stripped = line.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e]/g, '');
+  const stripped = line.replace(CONTROLS, '');
   return stripped.length > MAX_PLAIN_LINE ? `${stripped.slice(0, MAX_PLAIN_LINE)}... (${stripped.length} chars)` : stripped;
 }
 
-/** What one stderr line contributes to the log: never a message body, never an unbounded line. */
-export function describeStderrLine(line: string): { text: string | null; event: string | null } {
-  const ev = parseEventLine(line);
-  if (ev) {
-    return EVENT_NAME.test(ev.event) ? { text: `event=${ev.event}`, event: ev.event } : { text: 'event=(unrecognised name)', event: null };
+/** A wacli error message made fit for a log: no controls, no JIDs or runs of 8 or more digits (they identify people), at most 200 characters. */
+function safeMessage(message: string): string {
+  return message.replace(CONTROLS, '').replace(JID, '<jid>').replace(/\d{8,}/g, '<number>').trim().slice(0, MAX_ERROR_MESSAGE);
+}
+
+function stringField(o: unknown, key: string): string | null {
+  const v = typeof o === 'object' && o !== null ? (o as Record<string, unknown>)[key] : undefined;
+  return typeof v === 'string' ? v : null;
+}
+
+/** The error of a wacli failure envelope, `{"success":false,"error":"..."}`, or null when the line is not one. */
+function failureError(t: string): string | null {
+  if (!t.startsWith('{')) return null;
+  try {
+    const o = JSON.parse(t) as Record<string, unknown>;
+    return o.success === false ? stringField(o, 'error') : null;
+  } catch {
+    return null;
   }
+}
+
+/**
+ * What one wacli stderr line contributes to the daemon log. Never a message body and never an unbounded line.
+ * A recognised event logs its name only, except an error event, which also logs its message (wacli reports
+ * failures this way under --events). A wacli failure envelope logs its error the same way. Error messages lose
+ * control characters, JIDs and long numbers and stop at 200 characters. Any other line that looks like JSON
+ * (it starts with `{`, `[` or `"`, or contains `{"`) becomes a placeholder with its length. Plain lines lose
+ * control characters and are capped at 500 characters.
+ */
+export function describeStderrLine(line: string): { text: string | null; event: string | null } {
   const t = line.trim();
   if (t === '') return { text: null, event: null };
-  if (t.startsWith('{')) return { text: `(unrecognised json line, ${line.length} chars)`, event: null };
+  const ev = parseEventLine(line);
+  if (ev) {
+    if (!EVENT_NAME.test(ev.event)) return { text: 'event=(unrecognised name)', event: null };
+    const message = ev.event === 'error' ? safeMessage(stringField(ev.data, 'message') ?? '') : '';
+    return { text: message === '' ? `event=${ev.event}` : `error: ${message}`, event: ev.event };
+  }
+  const failure = failureError(t);
+  if (failure !== null && safeMessage(failure) !== '') return { text: `wacli error: ${safeMessage(failure)}`, event: null };
+  if (t.startsWith('{') || t.startsWith('[') || t.startsWith('"') || t.includes('{"')) {
+    return { text: `(unrecognised json line, ${line.length} chars)`, event: null };
+  }
   return { text: safeLine(line), event: null };
 }
 

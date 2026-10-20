@@ -693,3 +693,6 @@ overrides the earlier text where they differ.
   `SuccessfulExit: false` and the systemd unit `Restart=on-failure`, so a
   revoked session is not relaunched by the service layer while supervisor
   crashes still are. A stop request interrupts a backoff sleep.
+- A25. The daemon logs the sanitised message of an `error` event and of a wacli
+  failure envelope (controls stripped, JIDs and runs of 8 or more digits
+  replaced, 200 characters at most); other recognised events stay name-only.
