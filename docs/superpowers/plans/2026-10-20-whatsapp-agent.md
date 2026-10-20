@@ -596,7 +596,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ### Task 3: Fake wacli executable and fixtures
 
 **Files:**
-- Create: `test/fixtures/fake-wacli.mjs` (executable), `test/fixtures/README.md`, `test/fixtures/responses/*.json` (17 files listed below), `test/helpers/fake.ts`, `test/unit/fake-wacli.test.ts`
+- Create: `test/fixtures/fake-wacli.mjs` (executable), `test/fixtures/README.md`, `test/fixtures/responses/*.json` (16 files listed below), `test/helpers/fake.ts`, `test/unit/fake-wacli.test.ts`
 
 **Interfaces:**
 - Produces: a stand-in `wacli` binary driven by environment variables, and test helpers `FAKE_WACLI`, `FIXTURES`, `fakeEnv(extra?)`, `makeTmp()`, `removeTmp(dir)`, `readArgvLog(file): Promise<ArgvRecord[]>` where `ArgvRecord = { argv: string[]; key: string; env: Record<string, string | undefined> }`.
@@ -704,7 +704,7 @@ if (process.env.FAKE_WACLI_FAIL) {
   if (failKey === key || failKey === '*') fail(Number(code || 1), message || 'fake failure');
 }
 if (process.env.FAKE_WACLI_BIG === '1') {
-  process.stdout.write('x'.repeat(20 * 1024 * 1024));
+  await new Promise((resolve) => process.stdout.write('x'.repeat(20 * 1024 * 1024), resolve));
   process.exit(0);
 }
 
@@ -911,11 +911,11 @@ export async function removeTmp(dir: string): Promise<void> {
 
 /** Environment for spawning the fake. Strips wacli variables the runner must set itself. */
 export function fakeEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, FAKE_WACLI_FIXTURES: FIXTURES, ...extra };
+  const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.WACLI_READONLY;
   delete env.WACLI_MEDIA_ROOTS;
   delete env.NO_COLOR;
-  return env;
+  return { ...env, FAKE_WACLI_FIXTURES: FIXTURES, ...extra };
 }
 
 export async function readArgvLog(file: string): Promise<ArgvRecord[]> {
