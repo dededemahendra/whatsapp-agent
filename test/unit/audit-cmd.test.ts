@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { formatAudit, parseLimit, parseSince } from '../../src/ops/audit-cmd.js';
 import { claudeMcpAddCommand, mcpConfigHelp, mcpConfigJson } from '../../src/ops/mcp-config.js';
 import { resolvePaths } from '../../src/paths.js';
+import { readAudit, type AuditRecord } from '../../src/policy/audit.js';
+import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 describe('audit formatting', () => {
   it('prints one line per record with outcome, tool, recipient and reason', () => {
@@ -71,6 +75,70 @@ describe('audit formatting', () => {
   it('leaves a row with a name and a JID exactly as it was', () => {
     const text = formatAudit([{ ts: '2026-10-20T10:00:00.000Z', tool: 'send_text', to_jid: '1@s.whatsapp.net', to_name: 'Alice', kind: 'user', outcome: 'denied', reason: 'groups_disabled' }]);
     expect(text).toBe('2026-10-20T10:00:00.000Z  denied     send_text  Alice (1@s.whatsapp.net)  groups_disabled\n');
+  });
+
+  describe('a row that parsed but is not quite a record', () => {
+    const base = { ts: '2026-10-20T10:00:00.000Z', tool: 'send_text', kind: null, outcome: 'denied', reason: 'writes_disabled' };
+    const odd = (over: Record<string, unknown>): AuditRecord => ({ ...base, ...over }) as unknown as AuditRecord;
+    const line = (r: AuditRecord): string => formatAudit([r]).trimEnd();
+    const head = '2026-10-20T10:00:00.000Z  denied     send_text  ';
+
+    it('prints a row with no to_jid at all, or one whose to_jid is not a string, as unresolved instead of throwing', () => {
+      expect(line(odd({ to_name: null }))).toBe(`${head}(unresolved)  writes_disabled`);
+      expect(line(odd({ to_jid: 42, to_name: null }))).toBe(`${head}(unresolved)  writes_disabled`);
+      expect(line(odd({ to_jid: ['1@s.whatsapp.net'], to_name: null }))).toBe(`${head}(unresolved)  writes_disabled`);
+      expect(line(odd({ to_jid: { jid: 'x' }, to_name: null }))).toBe(`${head}(unresolved)  writes_disabled`);
+      expect(line(odd({ to_jid: '', to_name: null }))).toBe(`${head}(unresolved)  writes_disabled`);
+    });
+
+    it('treats a to_input that is not a string as absent, and still uses one that is', () => {
+      expect(line(odd({ to_jid: null, to_name: null, to_input: 7 }))).toBe(`${head}(unresolved)  writes_disabled`);
+      expect(line(odd({ to_jid: null, to_name: null, to_input: { a: 1 } }))).toBe(`${head}(unresolved)  writes_disabled`);
+      expect(line(odd({ to_jid: null, to_name: null, to_input: ['Dave'] }))).toBe(`${head}(unresolved)  writes_disabled`);
+      expect(line(odd({ to_name: null, to_input: 'Dave' }))).toBe(`${head}Dave (unresolved)  writes_disabled`);
+      expect(line(odd({ to_jid: 42, to_name: null, to_input: 'Dave' }))).toBe(`${head}Dave (unresolved)  writes_disabled`);
+    });
+
+    it('prints a name without a usable JID as the name alone, never as "(null)" or "(undefined)"', () => {
+      expect(line(odd({ to_name: 'Alice' }))).toBe(`${head}Alice  writes_disabled`);
+      expect(line(odd({ to_name: 'Alice', to_jid: 5 }))).toBe(`${head}Alice  writes_disabled`);
+      expect(line(odd({ to_name: 'Alice', to_jid: null }))).toBe(`${head}Alice  writes_disabled`);
+    });
+
+    it('prints the other fields it can, and skips the ones that are not strings', () => {
+      expect(line(odd({ to_jid: null, to_name: 5, message_id: 9, text: { t: 1 }, file: 3, reaction: [], reason: 'ok' })))
+        .toBe(`${head}(unresolved)  ok`);
+      expect(line(odd({ to_jid: '1@s.whatsapp.net', to_name: null, message_id: 'A', text: 'hi', file: '/tmp/x', reaction: '+1' })))
+        .toBe(`${head}1@s.whatsapp.net  id=A  writes_disabled  "hi"  /tmp/x  reaction=+1`);
+    });
+
+    it('prints a row with the outcome or tool missing as blanks rather than failing the whole listing', () => {
+      const text = formatAudit([odd({ outcome: undefined, to_jid: null }), odd({ tool: 3, to_jid: null }), odd({ to_jid: null })]);
+      expect(text.trimEnd().split('\n')).toHaveLength(3);
+    });
+
+    describe('read back from a file', () => {
+      let tmp: string;
+      beforeEach(async () => { tmp = await makeTmp(); });
+      afterEach(async () => { await removeTmp(tmp); });
+
+      it('lists every parseable row of an audit log, including ones from before these fields existed', async () => {
+        const file = path.join(tmp, 'audit.jsonl');
+        const rows = [
+          { ts: '2026-10-20T10:00:00.000Z', tool: 'send_text', outcome: 'sent', message_id: 'A', text: 'old row' },
+          { ts: '2026-10-20T10:01:00.000Z', tool: 'react', to_jid: 123, outcome: 'sent' },
+          { ts: '2026-10-20T10:02:00.000Z', tool: 'send_text', to_jid: null, to_input: 99, outcome: 'denied', reason: 'writes_disabled' },
+          { ts: '2026-10-20T10:03:00.000Z', tool: 'send_text', to_jid: '1@s.whatsapp.net', to_name: 'Alice', outcome: 'sent', message_id: 'B' },
+        ];
+        await writeFile(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+        const lines = formatAudit(await readAudit(file)).trimEnd().split('\n');
+        expect(lines).toHaveLength(4);
+        expect(lines[0]).toBe('2026-10-20T10:00:00.000Z  sent       send_text  (unresolved)  id=A  "old row"');
+        expect(lines[1]).toBe('2026-10-20T10:01:00.000Z  sent       react  (unresolved)');
+        expect(lines[2]).toBe('2026-10-20T10:02:00.000Z  denied     send_text  (unresolved)  writes_disabled');
+        expect(lines[3]).toBe('2026-10-20T10:03:00.000Z  sent       send_text  Alice (1@s.whatsapp.net)  id=B');
+      });
+    });
   });
 
   it('says so when empty', () => {

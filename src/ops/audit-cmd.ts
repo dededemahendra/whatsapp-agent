@@ -8,21 +8,27 @@ import { stripControls } from './text.js';
 /** The longest outcome is `attempted`, and the outcome column is padded to it so that every row lines up. */
 const OUTCOME_WIDTH = 'attempted'.length;
 
+/** A printable string field of a row, or null when the row has none: a row that parsed may still lack a field or hold a value of the wrong kind. */
+const field = (v: unknown): string | null => (typeof v === 'string' ? stripControls(v) : null);
+
+/** An optional field that the row actually has: a non-empty string. */
+const given = (v: unknown): v is string => typeof v === 'string' && v !== '';
+
 /** Names, text and paths in the log came from other people or from the agent, so control characters are removed before they reach a terminal. */
 export function formatAudit(records: AuditRecord[]): string {
   if (records.length === 0) return 'No audit records.\n';
   const lines = records.map((r) => {
-    const name = r.to_name ? stripControls(r.to_name) : '';
-    const jid = r.to_jid === null ? null : stripControls(r.to_jid);
+    const name = field(r.to_name) ?? '';
+    const jid = field(r.to_jid) || null;
     // A row written before the recipient was looked up has no JID. What the agent typed is shown, labelled, so it cannot pass for a resolved name.
-    const typed = r.to_input ? stripControls(r.to_input) : '';
-    const who = name ? `${name} (${jid})` : (jid ?? (typed ? `${typed} (unresolved)` : '(unresolved)'));
-    const parts = [stripControls(r.ts), stripControls(r.outcome).padEnd(OUTCOME_WIDTH), stripControls(r.tool), who];
-    if (r.message_id) parts.push(`id=${stripControls(r.message_id)}`);
-    if (r.reason) parts.push(stripControls(r.reason));
-    if (r.text) parts.push(JSON.stringify(stripControls(r.text)));
-    if (r.file) parts.push(stripControls(r.file));
-    if (r.reaction) parts.push(`reaction=${stripControls(r.reaction)}`);
+    const typed = field(r.to_input) ?? '';
+    const who = name ? (jid === null ? name : `${name} (${jid})`) : (jid ?? (typed ? `${typed} (unresolved)` : '(unresolved)'));
+    const parts = [field(r.ts) ?? '', (field(r.outcome) ?? '').padEnd(OUTCOME_WIDTH), field(r.tool) ?? '', who];
+    if (given(r.message_id)) parts.push(`id=${stripControls(r.message_id)}`);
+    if (given(r.reason)) parts.push(stripControls(r.reason));
+    if (given(r.text)) parts.push(JSON.stringify(stripControls(r.text)));
+    if (given(r.file)) parts.push(stripControls(r.file));
+    if (given(r.reaction)) parts.push(`reaction=${stripControls(r.reaction)}`);
     return parts.join('  ');
   });
   return lines.join('\n') + '\n';
