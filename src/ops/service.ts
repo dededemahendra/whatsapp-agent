@@ -29,7 +29,7 @@ export function platformOf(p: NodeJS.Platform = process.platform): Platform {
 export function isGlobalInstall(cliPath: string, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE === '1') return true;
   const p = cliPath.split(path.sep).join('/');
-  if (/\/(_npx|dlx-[^/]+|\.pnpm-store|\.cache)\//.test(p)) return false;
+  if (/\/(_npx|dlx(-[^/]+)?|\.pnpm-store|\.cache|Caches|bunx-[^/]+)\//.test(p)) return false;
   return /\/node_modules\/whatsapp-agent\//.test(p);
 }
 
@@ -189,9 +189,8 @@ export const realFs: ServiceFs = {
 };
 
 export function servicePathsForThisMachine(paths: Paths, env: NodeJS.ProcessEnv = process.env): ServicePaths {
-  const extra: Record<string, string> = {};
-  if (env.WHATSAPP_AGENT_CONFIG_DIR) extra.WHATSAPP_AGENT_CONFIG_DIR = env.WHATSAPP_AGENT_CONFIG_DIR;
-  if (env.WHATSAPP_AGENT_DATA_DIR) extra.WHATSAPP_AGENT_DATA_DIR = env.WHATSAPP_AGENT_DATA_DIR;
+  /** Always pinned: a login service does not inherit the installer's shell (XDG variables included). */
+  const extra: Record<string, string> = { WHATSAPP_AGENT_CONFIG_DIR: paths.configDir, WHATSAPP_AGENT_DATA_DIR: paths.dataDir };
   return {
     nodePath: process.execPath,
     cliPath: fileURLToPath(new URL('../cli.js', import.meta.url)),

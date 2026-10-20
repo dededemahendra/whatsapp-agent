@@ -51,7 +51,7 @@ export function daemonCommand(): Command {
     const manager = serviceManagerForThisMachine(paths);
     const s = manager ? await manager.status() : { installed: false, running: null, detail: 'not supported on this platform' };
     process.stdout.write(`${s.detail}\n`);
-    if (manager && !s.running) process.exitCode = 1;
+    if (!manager || !s.running) process.exitCode = 1;
   });
 
   cmd.command('logs').description('Show the daemon log').option('-n, --lines <n>', 'lines to show', '100').option('-f, --follow', 'keep printing new lines').action(async (opts: { lines: string; follow?: boolean }) => {

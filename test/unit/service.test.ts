@@ -1,8 +1,9 @@
 import { appendFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createServiceManager, isGlobalInstall, launchdPlist, launchdPlistPath, systemdUnit, systemdUnitPath, type ServicePaths } from '../../src/ops/service.js';
+import { createServiceManager, isGlobalInstall, launchdPlist, launchdPlistPath, servicePathsForThisMachine, systemdUnit, systemdUnitPath, type ServicePaths } from '../../src/ops/service.js';
 import { followFile, tailFile } from '../../src/ops/tail.js';
+import { resolvePaths } from '../../src/paths.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 const sp: ServicePaths = {
@@ -17,6 +18,10 @@ describe('isGlobalInstall', () => {
     expect(isGlobalInstall('/Users/u/.cache/dlx-9f8e/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
     expect(isGlobalInstall('/Users/u/Developer/whatsapp-agent/dist/cli.js', {})).toBe(false);
     expect(isGlobalInstall('/Users/u/Developer/whatsapp-agent/dist/cli.js', { WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE: '1' })).toBe(true);
+    expect(isGlobalInstall('/Users/u/Library/Caches/pnpm/dlx/abc123/1700000000-1/node_modules/.pnpm/whatsapp-agent@0.1.0/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
+    expect(isGlobalInstall('/home/u/.cache/pnpm/dlx/abc123/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
+    expect(isGlobalInstall('/private/tmp/bunx-501-whatsapp-agent@latest/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
+    expect(isGlobalInstall('/Users/u/Library/pnpm/global/5/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(true);
   });
 });
 
@@ -39,6 +44,13 @@ describe('templates', () => {
     expect(unit).toContain('Environment=WHATSAPP_AGENT_WACLI_BIN=/opt/homebrew/bin/wacli');
     expect(unit).toContain('Restart=on-failure');
     expect(systemdUnitPath('/home/u')).toBe('/home/u/.config/systemd/user/whatsapp-agent.service');
+  });
+  it('servicePathsForThisMachine pins the resolved config and data dirs into the service environment', () => {
+    const paths = resolvePaths({ XDG_CONFIG_HOME: '/mnt/cfg', XDG_DATA_HOME: '/mnt/data' }, '/home/u');
+    const sp = servicePathsForThisMachine(paths, { WHATSAPP_AGENT_WACLI_BIN: '/opt/wacli' });
+    expect(sp.env).toEqual({ WHATSAPP_AGENT_CONFIG_DIR: '/mnt/cfg/whatsapp-agent', WHATSAPP_AGENT_DATA_DIR: '/mnt/data/whatsapp-agent' });
+    expect(sp.wacliBin).toBe('/opt/wacli');
+    expect(sp.dataDir).toBe('/mnt/data/whatsapp-agent');
   });
 });
 
