@@ -131,7 +131,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
       try {
-        recipient = await deps.resolver.resolve(a.to);
+        recipient = await deps.resolver.resolve(a.to, { exact: true });
         const send: TextSend = { text: a.message, replyTo: a.reply_to, replyToSender: a.reply_to_sender, mentions: a.mentions, linkPreview: a.link_preview };
         const state = textState(recipient, send);
         const d = await gate(ctx, 'send_text', recipient, { expect: state });
@@ -173,7 +173,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
       try {
-        recipient = await deps.resolver.resolve(a.to);
+        recipient = await deps.resolver.resolve(a.to, { exact: true });
         const policy = await deps.loadPolicy();
         const facts = (await fileInsideRoots(a.path, policy.writes.fileRoots)) ? await fileFacts(a.path) : null;
         // Without facts the file is treated as outside the roots, so the gate refuses before these placeholder values are looked at.
@@ -217,7 +217,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
       try {
-        recipient = await deps.resolver.resolve(a.chat);
+        recipient = await deps.resolver.resolve(a.chat, { exact: true });
         const send: ReactSend = { reaction: a.reaction, messageId: a.message_id, sender: a.sender };
         const state = reactState(recipient, send);
         const d = await gate(ctx, 'react', recipient, { expect: state });
@@ -250,7 +250,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
       try {
-        recipient = await deps.resolver.resolve(a.chat);
+        recipient = await deps.resolver.resolve(a.chat, { exact: true });
         const d = await gate(ctx, 'mark_read', recipient);
         if (d.kind === 'deny') return denied('mark_read', recipient, d, {});
         release = hold();

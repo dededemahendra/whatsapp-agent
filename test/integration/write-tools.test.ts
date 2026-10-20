@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Policy } from '../../src/policy/schema.js';
-import { makeTmp, removeTmp } from '../helpers/fake.js';
+import { fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
 import { errorOf, makeHarness, type Harness } from '../helpers/harness.js';
 
 let h: Harness;
@@ -237,5 +237,64 @@ describe('react and mark_read', () => {
     const [cmd] = (await h.argv()).filter((x) => x.key === 'chats mark-read');
     expect(cmd!.argv.slice(3)).toEqual(['chats', 'mark-read', '--chat=61400000001@s.whatsapp.net']);
     expect(r.structuredContent).toMatchObject({ ok: true, chat: { jid: '61400000001@s.whatsapp.net' } });
+  });
+});
+
+describe('names are matched exactly for writes', () => {
+  const PLUMBING = '61400000012@s.whatsapp.net';
+  const row = (jid: string, name: string) => ({ jid, kind: 'dm', name, last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 });
+  const contact = (jid: string, name: string) => ({ jid, phone: `+${jid.split('@')[0]}`, name, alias: '', system_name: '', updated_at: '2026-10-19T08:00:00Z' });
+  const envelope = (data: unknown) => JSON.stringify({ success: true, data, error: null });
+
+  async function withDave(fn: (env: Record<string, string>) => Promise<void>): Promise<void> {
+    const dir = await fixturesWith({
+      'chats_list.json': envelope([row(PLUMBING, "Dave's Plumbing")]),
+      'contacts_search.json': envelope([contact('61400000013@s.whatsapp.net', 'David Smith')]),
+    });
+    try {
+      await fn({ FAKE_WACLI_FIXTURES: dir });
+    } finally {
+      await removeTmp(dir);
+    }
+  }
+
+  const calls: Array<[string, Record<string, unknown>, string]> = [
+    ['send_text', { to: 'Dave', message: 'hello' }, 'send text'],
+    ['send_file', { to: 'Dave', path: '/tmp/none.pdf' }, 'send file'],
+    ['react', { chat: 'Dave', message_id: 'MSG1', reaction: '👍' }, 'send react'],
+    ['mark_read', { chat: 'Dave' }, 'chats mark-read'],
+  ];
+
+  it.each(calls)('%s refuses a lone partial match and offers it as the one candidate', async (tool, args, key) => {
+    await withDave(async (env) => {
+      h = await makeHarness({ policy: enabled({ confirm: 'never' }), env });
+      const r = await h.call(tool, args);
+      expect(r.isError).toBe(true);
+      expect(errorOf(r)).toMatchObject({
+        error: 'ambiguous_recipient',
+        message: 'No chat or contact is named exactly "Dave". Use the exact name or the JID.',
+        candidates: [{ jid: PLUMBING, name: "Dave's Plumbing", kind: 'user' }],
+      });
+      expect((await h.argv()).filter((x) => x.key === key)).toHaveLength(0);
+      expect(h.audits.at(-1)).toMatchObject({ tool, outcome: 'failed', reason: 'ambiguous_recipient', to_jid: null });
+    });
+  });
+
+  it('sends when the whole name is given, and when the JID is', async () => {
+    await withDave(async (env) => {
+      h = await makeHarness({ policy: enabled({ confirm: 'never', rateLimit: { perHour: 20, minGapSeconds: 0 } }), env });
+      expect((await h.call('send_text', { to: "Dave's Plumbing", message: 'hello' })).isError).toBeFalsy();
+      expect((await h.call('send_text', { to: PLUMBING, message: 'hello again' })).isError).toBeFalsy();
+      expect(await sendArgv()).toHaveLength(2);
+      expect(h.audits.filter((a) => a.outcome === 'sent').every((a) => a.to_jid === PLUMBING)).toBe(true);
+    });
+  });
+
+  it('never prompts for a name that is not exact, so the person is not asked to approve a guess', async () => {
+    await withDave(async (env) => {
+      h = await makeHarness({ policy: enabled(), env });
+      expect(errorOf(await h.call('send_text', { to: 'Dave', message: 'hello' })).error).toBe('ambiguous_recipient');
+      expect(h.elicitations).toHaveLength(0);
+    });
   });
 });

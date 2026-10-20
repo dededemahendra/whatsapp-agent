@@ -191,3 +191,18 @@ describe('groups', () => {
     expect(errorOf(r).error).toBe('invalid_input');
   });
 });
+
+describe('names are matched loosely for reads', () => {
+  it('lets a read tool take a lone partial match that a write tool refuses', async () => {
+    const row = { jid: '61400000012@s.whatsapp.net', kind: 'dm', name: "Dave's Plumbing", last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 };
+    const dir = await fixturesWith({ 'chats_list.json': JSON.stringify({ success: true, data: [row], error: null }) });
+    try {
+      h = await makeHarness({ env: { FAKE_WACLI_FIXTURES: dir } });
+      const r = await h.call('read_messages', { chat: 'Dave' });
+      expect(r.isError).toBeFalsy();
+      expect(r.structuredContent).toMatchObject({ chat: { jid: '61400000012@s.whatsapp.net', name: "Dave's Plumbing" } });
+    } finally {
+      await removeTmp(dir);
+    }
+  });
+});
