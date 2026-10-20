@@ -20,7 +20,7 @@ describe('send_text', () => {
     expect(r.isError).toBe(true);
     expect(errorOf(r)).toMatchObject({ error: 'writes_disabled', message: expect.stringContaining('policy enable') });
     expect(await h.argv()).toEqual([]);
-    expect(h.audits).toEqual([expect.objectContaining({ tool: 'send_text', outcome: 'denied', reason: 'writes_disabled', to_jid: null, to_name: null, kind: null, text: 'hello' })]);
+    expect(h.audits).toEqual([expect.objectContaining({ tool: 'send_text', outcome: 'denied', reason: 'writes_disabled', to_jid: null, to_name: null, kind: null, to_input: 'Alice', text: 'hello' })]);
   });
 
   it('asks the person to confirm, then sends once and audits it', async () => {
@@ -172,7 +172,7 @@ describe('send_text', () => {
   it('reports an ambiguous recipient and a wacli failure as failed audits', async () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
     expect(errorOf(await h.call('send_text', { to: 'a', message: 'x' })).error).toBe('ambiguous_recipient');
-    expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'ambiguous_recipient', to_jid: null });
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'ambiguous_recipient', to_jid: null, to_input: 'a' });
     await h.close();
     h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|usync failed' } });
     expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'x' })).error).toBe('wacli_error');
@@ -321,7 +321,7 @@ describe('the master switch comes before the recipient lookup', () => {
     expect(r.isError).toBe(true);
     expect(errorOf(r)).toMatchObject({ error: 'writes_disabled', message: expect.stringContaining('policy enable') });
     expect(await h.argv()).toEqual([]);
-    expect(h.audits).toEqual([expect.objectContaining({ tool, outcome: 'denied', reason: 'writes_disabled', to_jid: null, ...audited })]);
+    expect(h.audits).toEqual([expect.objectContaining({ tool, outcome: 'denied', reason: 'writes_disabled', to_jid: null, to_input: 'a', ...audited })]);
   });
 
   it('still looks the name up once writes are on', async () => {
@@ -960,6 +960,7 @@ describe('the policy file on disk', () => {
     expect((await h.argv()).filter((x) => x.key === 'send react' || x.key === 'chats mark-read')).toHaveLength(0);
     expect(h.audits.slice(before)).toHaveLength(3);
     expect(h.audits.slice(before).every((a) => a.outcome === 'failed' && a.reason === 'invalid_input' && a.to_jid === null)).toBe(true);
+    expect(h.audits.slice(before).map((a) => a.to_input)).toEqual(['Alice', 'Alice', 'Alice']);
 
     await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: true, confirm: 'never' })(h.deps.startupPolicy));
     expect((await h.call('send_text', { to: 'Alice', message: 'back' })).isError).toBeFalsy();
@@ -1004,5 +1005,66 @@ describe('input limits on write tools', () => {
     expect(twenty.isError).toBeFalsy();
     const [send] = await sendArgv();
     expect(send!.argv.filter((a) => a.startsWith('--mention='))).toHaveLength(20);
+  });
+});
+
+describe('rows written before there is a JID carry what the agent typed', () => {
+  const never = enabled({ confirm: 'never', rateLimit: { perHour: 50, minGapSeconds: 0 } });
+
+  it('is on the writes_disabled denial for every tool, taken from the recipient argument of that tool', async () => {
+    h = await makeHarness();
+    await h.call('send_text', { to: 'Dave', message: 'hi' });
+    await h.call('send_file', { to: 'Dave File', path: '/tmp/x.pdf' });
+    await h.call('react', { chat: 'Dave Chat', message_id: 'MSG1', reaction: '👍' });
+    await h.call('mark_read', { chat: 'Dave Read' });
+    expect(h.audits.map((a) => [a.tool, a.outcome, a.to_jid, a.to_input])).toEqual([
+      ['send_text', 'denied', null, 'Dave'], ['send_file', 'denied', null, 'Dave File'], ['react', 'denied', null, 'Dave Chat'], ['mark_read', 'denied', null, 'Dave Read'],
+    ]);
+  });
+
+  it('is on an ambiguous_recipient failure', async () => {
+    h = await makeHarness({ policy: never });
+    expect(errorOf(await h.call('send_text', { to: 'a', message: 'x' })).error).toBe('ambiguous_recipient');
+    expect(h.audits).toEqual([expect.objectContaining({ outcome: 'failed', reason: 'ambiguous_recipient', to_jid: null, to_input: 'a' })]);
+  });
+
+  it('is on the other errors that come from looking the recipient up', async () => {
+    h = await makeHarness({ policy: never, env: { FAKE_WACLI_EMPTY: 'chats list,contacts search' } });
+    expect(errorOf(await h.call('send_text', { to: 'Nobody', message: 'x' })).error).toBe('not_found');
+    expect(errorOf(await h.call('react', { chat: '0400 000 001', message_id: 'MSG1', reaction: '👍' })).error).toBe('invalid_input');
+    expect(errorOf(await h.call('mark_read', { chat: 'abc@s.whatsapp.net' })).error).toBe('invalid_input');
+    expect(h.audits.map((a) => [a.reason, a.to_jid, a.to_input])).toEqual([['not_found', null, 'Nobody'], ['invalid_input', null, '0400 000 001'], ['invalid_input', null, 'abc@s.whatsapp.net']]);
+  });
+
+  it('is on a failure that happens before the recipient is looked up', async () => {
+    h = await makeHarness({ policy: never });
+    h.deps.loadPolicy = async () => { throw new AgentError('invalid_input', 'policy broken'); };
+    expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'x' })).error).toBe('invalid_input');
+    expect(h.audits).toEqual([expect.objectContaining({ outcome: 'failed', to_jid: null, to_input: 'Alice' })]);
+  });
+
+  it('is cut to 80 characters and has its control characters stripped', async () => {
+    h = await makeHarness();
+    await h.call('send_text', { to: 'x'.repeat(100), message: 'hi' });
+    await h.call('send_text', { to: 'Al\nice\u0007', message: 'hi' });
+    expect(h.audits[0]!.to_input).toBe('x'.repeat(80));
+    expect(h.audits[1]!.to_input).toBe('Alice');
+  });
+
+  it('is on no row once the recipient is known, whichever way the call ends', async () => {
+    h = await makeHarness({ policy: never });
+    expect((await h.call('send_text', { to: 'Alice', message: 'one' })).isError).toBeFalsy();
+    expect(errorOf(await h.call('send_text', { to: 'Family', message: 'two' })).error).toBe('groups_disabled');
+    expect(h.audits.map((a) => a.outcome)).toEqual(['attempted', 'sent', 'denied']);
+    for (const row of h.audits) expect(row).not.toHaveProperty('to_input');
+    await h.close();
+
+    h = await makeHarness({ policy: never, env: { FAKE_WACLI_FAIL: 'send text|1|usync failed' } });
+    await h.call('send_text', { to: 'Alice', message: 'three' });
+    expect(h.audits.map((a) => a.outcome)).toEqual(['attempted', 'failed']);
+    for (const row of h.audits) {
+      expect(row.to_jid).toBe('61400000001@s.whatsapp.net');
+      expect(row).not.toHaveProperty('to_input');
+    }
   });
 });

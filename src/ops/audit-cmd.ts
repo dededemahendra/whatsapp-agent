@@ -11,7 +11,9 @@ export function formatAudit(records: AuditRecord[]): string {
   const lines = records.map((r) => {
     const name = r.to_name ? stripControls(r.to_name) : '';
     const jid = r.to_jid === null ? null : stripControls(r.to_jid);
-    const who = name ? `${name} (${jid})` : (jid ?? '(unresolved)');
+    // A row written before the recipient was looked up has no JID; what the agent typed stands in for it.
+    const typed = r.to_input ? stripControls(r.to_input) : '';
+    const who = name ? `${name} (${jid})` : (jid ?? (typed || '(unresolved)'));
     const parts = [stripControls(r.ts), stripControls(r.outcome).padEnd(6), stripControls(r.tool), who];
     if (r.message_id) parts.push(`id=${stripControls(r.message_id)}`);
     if (r.reason) parts.push(stripControls(r.reason));

@@ -37,6 +37,31 @@ describe('audit formatting', () => {
       '2026-10-20T10:00:01.000Z  sent    send_text  Alice (1@s.whatsapp.net)  id=A  "hi"',
     ]);
   });
+  it('shows what the agent typed where a row has no JID, and (unresolved) only when nothing was recorded', () => {
+    const base = { ts: '2026-10-20T10:00:00.000Z', tool: 'send_text', to_jid: null, to_name: null, kind: null } as const;
+    const lines = formatAudit([
+      { ...base, outcome: 'denied', reason: 'writes_disabled', to_input: 'Dave', text: 'hi' },
+      { ...base, outcome: 'failed', reason: 'ambiguous_recipient', to_input: "Dave's Plumbing" },
+      { ...base, outcome: 'denied', reason: 'writes_disabled' },
+    ]).trim().split('\n');
+    expect(lines[0]).toContain('  send_text  Dave  writes_disabled  "hi"');
+    expect(lines[0]).not.toContain('(unresolved)');
+    expect(lines[1]).toContain("  send_text  Dave's Plumbing  ambiguous_recipient");
+    expect(lines[2]).toContain('  send_text  (unresolved)  writes_disabled');
+  });
+
+  it('prefers the JID to the input when a row has both, and strips controls from the input it prints', () => {
+    const base = { ts: '2026-10-20T10:00:00.000Z', tool: 'send_text', kind: null, outcome: 'denied' } as const;
+    const lines = formatAudit([
+      { ...base, to_jid: '1@s.whatsapp.net', to_name: null, to_input: 'ignored' },
+      { ...base, to_jid: null, to_name: null, to_input: 'Da\u001b[2Jve\u0007' },
+    ]).trim().split('\n');
+    expect(lines[0]).toContain('  send_text  1@s.whatsapp.net');
+    expect(lines[0]).not.toContain('ignored');
+    expect(lines[1]).toContain('  send_text  Da[2Jve');
+    expect(lines[1]).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+  });
+
   it('says so when empty', () => {
     expect(formatAudit([])).toBe('No audit records.\n');
   });

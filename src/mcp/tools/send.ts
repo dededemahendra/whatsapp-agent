@@ -4,7 +4,7 @@ import type { CallToolResult, InputRequiredResult, McpServer } from '@modelconte
 import * as z from 'zod/v4';
 import { AgentError, toToolError } from '../../errors.js';
 import { debug } from '../../log.js';
-import type { AuditRecord } from '../../policy/audit.js';
+import { auditInput, type AuditRecord } from '../../policy/audit.js';
 import { DENY_MESSAGES, decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
 import type { Policy } from '../../policy/schema.js';
 import type { Resolved } from '../../wacli/resolve.js';
@@ -167,16 +167,20 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   }
 
   /** The master switch, read before the recipient is looked up, so a switched-off server does not query wacli for a write it will refuse. */
-  async function switchedOff(tool: WriteTool, extra: Partial<AuditRecord>): Promise<CallToolResult | null> {
+  async function switchedOff(tool: WriteTool, input: string, extra: Partial<AuditRecord>): Promise<CallToolResult | null> {
     if ((await deps.loadPolicy()).writes.enabled) return null;
-    return denied(tool, null, { kind: 'deny', code: 'writes_disabled', message: DENY_MESSAGES.writes_disabled }, extra);
+    return denied(tool, null, { kind: 'deny', code: 'writes_disabled', message: DENY_MESSAGES.writes_disabled }, { to_input: auditInput(input), ...extra });
   }
 
-  async function failed(progress: Progress, tool: WriteTool, recipient: Resolved | null, e: unknown, extra: Partial<AuditRecord>): Promise<CallToolResult> {
+  /** `input` is what the agent called the recipient; it goes on the row only while there is no JID to name the recipient by. */
+  async function failed(progress: Progress, tool: WriteTool, recipient: Resolved | null, e: unknown, extra: Partial<AuditRecord>, input: string): Promise<CallToolResult> {
     const error = progress.sent ? asUncertain(e) : e;
     const uncertain = isUncertain(error);
     const code = error instanceof AgentError ? error.code : 'error';
-    await record({ ...base(tool, recipient), outcome: 'failed', reason: uncertain ? `${code}${UNCERTAIN_REASON}` : code, ...(uncertain ? { uncertain: true } : {}), ...extra });
+    await record({
+      ...base(tool, recipient), ...(recipient === null ? { to_input: auditInput(input) } : {}),
+      outcome: 'failed', reason: uncertain ? `${code}${UNCERTAIN_REASON}` : code, ...(uncertain ? { uncertain: true } : {}), ...extra,
+    });
     return toToolError(error);
   }
 
@@ -201,7 +205,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let release: (() => void) | null = null;
       const progress: Progress = { sent: false };
       try {
-        const off = await switchedOff('send_text', { text: a.message });
+        const off = await switchedOff('send_text', a.to, { text: a.message });
         if (off) return off;
         recipient = await deps.resolver.resolve(a.to, { exact: true });
         const send: TextSend = { text: a.message, replyTo: a.reply_to, replyToSender: a.reply_to_sender, mentions: a.mentions, linkPreview: a.link_preview };
@@ -220,7 +224,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         await record({ ...base('send_text', recipient), outcome: 'sent', ...(id ? { message_id: id } : {}), text: a.message });
         return ok({ sent: true, message_id: id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
-        return await failed(progress, 'send_text', recipient, e, { text: a.message });
+        return await failed(progress, 'send_text', recipient, e, { text: a.message }, a.to);
       } finally {
         release?.();
       }
@@ -247,7 +251,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let release: (() => void) | null = null;
       const progress: Progress = { sent: false };
       try {
-        const off = await switchedOff('send_file', { file: a.path });
+        const off = await switchedOff('send_file', a.to, { file: a.path });
         if (off) return off;
         recipient = await deps.resolver.resolve(a.to, { exact: true });
         // One snapshot of the policy serves the file check, the decision and the roots handed to wacli, so they cannot disagree.
@@ -271,7 +275,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         await record({ ...base('send_file', recipient), outcome: 'sent', ...(id ? { message_id: id } : {}), file: a.path, text: a.caption });
         return ok({ sent: true, message_id: id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
-        return await failed(progress, 'send_file', recipient, e, { file: a.path });
+        return await failed(progress, 'send_file', recipient, e, { file: a.path }, a.to);
       } finally {
         release?.();
       }
@@ -297,7 +301,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let release: (() => void) | null = null;
       const progress: Progress = { sent: false };
       try {
-        const off = await switchedOff('react', { reaction: a.reaction, message_id: a.message_id });
+        const off = await switchedOff('react', a.chat, { reaction: a.reaction, message_id: a.message_id });
         if (off) return off;
         recipient = await deps.resolver.resolve(a.chat, { exact: true });
         const send: ReactSend = { reaction: a.reaction, messageId: a.message_id, sender: a.sender };
@@ -313,7 +317,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         await record({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
         return ok({ sent: true, message_id: id, to: recipient });
       } catch (e) {
-        return await failed(progress, 'react', recipient, e, { reaction: a.reaction, message_id: a.message_id });
+        return await failed(progress, 'react', recipient, e, { reaction: a.reaction, message_id: a.message_id }, a.chat);
       } finally {
         release?.();
       }
@@ -334,7 +338,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let release: (() => void) | null = null;
       const progress: Progress = { sent: false }; // marking a chat read can be repeated, so a failure here is never uncertain
       try {
-        const off = await switchedOff('mark_read', {});
+        const off = await switchedOff('mark_read', a.chat, {});
         if (off) return off;
         recipient = await deps.resolver.resolve(a.chat, { exact: true });
         const d = await gate(ctx, 'mark_read', recipient);
@@ -345,7 +349,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         await record({ ...base('mark_read', recipient), outcome: 'sent' });
         return ok({ ok: true, chat: recipient });
       } catch (e) {
-        return await failed(progress, 'mark_read', recipient, e, {});
+        return await failed(progress, 'mark_read', recipient, e, {}, a.chat);
       } finally {
         release?.();
       }
