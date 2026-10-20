@@ -4,6 +4,8 @@ import type { ServerDeps } from './deps.js';
 import { registerChatTools } from './tools/chats.js';
 import { registerContactTools } from './tools/contacts.js';
 import { registerGroupTools } from './tools/groups.js';
+import { registerMediaTool } from './tools/media.js';
+import { registerMessageTools } from './tools/messages.js';
 import { registerStatusTool } from './tools/status.js';
 
 export const INSTRUCTIONS = [
@@ -23,5 +25,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerChatTools(server, deps);
   registerContactTools(server, deps);
   registerGroupTools(server, deps);
+  registerMessageTools(server, deps);
+  registerMediaTool(server, deps);
   return server;
 }
