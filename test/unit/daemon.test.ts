@@ -29,7 +29,7 @@ describe('parseEventLine', () => {
 });
 
 describe('startSupervisor', () => {
-  function start(script: string, over: { sleeps?: number[]; sleep?: (ms: number) => Promise<void> } = {}) {
+  function start(script: string, over: { sleeps?: number[]; sleep?: (ms: number) => Promise<void>; loggedOutGraceMs?: number } = {}) {
     const lines: string[] = [];
     const sleeps: number[] = over.sleeps ?? [];
     const handle = startSupervisor({
@@ -40,6 +40,7 @@ describe('startSupervisor', () => {
       log: (l) => lines.push(l),
       backoff: { initialMs: 50, maxMs: 200, resetAfterMs: 60_000 },
       sleep: over.sleep ?? (async (ms) => { sleeps.push(ms); }),
+      ...(over.loggedOutGraceMs === undefined ? {} : { loggedOutGraceMs: over.loggedOutGraceMs }),
     });
     return { handle, lines, sleeps };
   }
@@ -50,6 +51,32 @@ describe('startSupervisor', () => {
     expect(sleeps).toEqual([]);
     expect(lines.some((l) => l.includes('event=connected'))).toBe(true);
     expect(lines.some((l) => l.includes('whatsapp-agent setup'))).toBe(true);
+  });
+
+  it('logged_out stops a child that lingers: SIGTERM first, so no SIGKILL is needed', async () => {
+    const { handle, lines } = start('connected;logged_out;sleep:30000');
+    try {
+      const outcome = await Promise.race([handle.done, new Promise<string>((resolve) => setTimeout(() => resolve('still running'), 4000))]);
+      expect(outcome).toBe('logged_out');
+      expect(lines.some((l) => l.includes('event=disconnected'))).toBe(true);
+      expect(lines.some((l) => l.includes('SIGKILL'))).toBe(false);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('logged_out escalates to SIGKILL when the child ignores SIGTERM for the grace period', async () => {
+    const { handle, lines } = start('ignore-term;connected;logged_out;sleep:30000', { loggedOutGraceMs: 300 });
+    const startedAt = Date.now();
+    try {
+      const outcome = await Promise.race([handle.done, new Promise<string>((resolve) => setTimeout(() => resolve('still running'), 6000))]);
+      expect(outcome).toBe('logged_out');
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(250);
+      expect(lines.some((l) => l.includes('SIGKILL'))).toBe(true);
+      expect(lines.some((l) => l.includes('event=disconnected'))).toBe(false);
+    } finally {
+      await handle.stop();
+    }
   });
 
   it('crash restarts with backoff, doubling to the cap, then stop() ends it', async () => {

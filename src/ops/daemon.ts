@@ -94,6 +94,8 @@ export interface SupervisorOptions {
   backoff?: { initialMs: number; maxMs: number; resetAfterMs: number };
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** How long a child gets to leave after SIGTERM once it has reported logged_out, before it is killed. Default 5 s. */
+  loggedOutGraceMs?: number;
 }
 
 export interface SupervisorHandle {
@@ -107,6 +109,7 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
   const backoff = opts.backoff ?? { initialMs: 5_000, maxMs: 60_000, resetAfterMs: 10 * 60_000 };
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
+  const loggedOutGraceMs = opts.loggedOutGraceMs ?? 5_000;
   const stamp = () => new Date(now()).toISOString();
   const args = buildSyncArgs(opts.account, opts.daemon);
 
@@ -120,17 +123,34 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
     new Promise((resolve) => {
       const startedAt = now();
       let loggedOut = false;
+      let killTimer: NodeJS.Timeout | undefined;
       opts.log(`${stamp()} starting: ${opts.bin} ${args.join(' ')}`);
-      child = spawn(opts.bin, args, { env: { ...(opts.env ?? process.env), NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
-      const rl = readline.createInterface({ input: child.stderr! });
+      const proc = spawn(opts.bin, args, { env: { ...(opts.env ?? process.env), NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = proc;
+      const running = (): boolean => proc.exitCode === null && proc.signalCode === null;
+      /** After logged_out wacli has nothing left to do; make sure it does not linger, so the supervisor can finish. */
+      const stopAfterLogout = (): void => {
+        if (!running()) return;
+        proc.kill('SIGTERM');
+        killTimer = setTimeout(() => {
+          if (!running()) return;
+          opts.log(`${stamp()} wacli did not exit after SIGTERM; sending SIGKILL`);
+          proc.kill('SIGKILL');
+        }, loggedOutGraceMs);
+        killTimer.unref();
+      };
+      const rl = readline.createInterface({ input: proc.stderr! });
       rl.on('line', (line) => {
         const d = describeStderrLine(line);
-        if (d.event === 'logged_out') loggedOut = true;
         if (d.text !== null) opts.log(`${stamp()} ${d.text}`);
+        if (d.event === 'logged_out' && !loggedOut) {
+          loggedOut = true;
+          stopAfterLogout();
+        }
       });
-      child.stdout?.on('data', () => { /* sync prints nothing useful on stdout */ });
-      child.on('error', (err) => opts.log(`${stamp()} spawn error: ${err.message}`));
-      child.on('close', (code) => { child = null; resolve({ code, loggedOut, startedAt }); });
+      proc.stdout?.on('data', () => { /* sync prints nothing useful on stdout */ });
+      proc.on('error', (err) => opts.log(`${stamp()} spawn error: ${err.message}`));
+      proc.on('close', (code) => { clearTimeout(killTimer); child = null; resolve({ code, loggedOut, startedAt }); });
     });
 
   const done = (async (): Promise<'logged_out' | 'stopped'> => {

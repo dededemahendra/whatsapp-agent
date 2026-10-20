@@ -16,7 +16,7 @@ Behaviour is controlled by environment variables:
 | `FAKE_WACLI_EMPTY` | Comma-separated keys that answer `{"success":true,"data":[]}`. |
 | `FAKE_WACLI_STORE_DIR` | Replaces `__STORE_DIR__` in fixtures (doctor). |
 | `FAKE_WACLI_WARN` | `repeated` writes `warning: repeated send within 5 seconds` to stderr alongside a successful response. |
-| `FAKE_WACLI_SYNC` | Script for `sync`: segments per attempt separated by `|`, steps by `;`. Steps: an event name (emitted as NDJSON on stderr), `sleep:<ms>`, `exit:<code>`, `crash`, `text` (a non-JSON stderr line), `error:<message>` (an `error` event carrying the message, the shape wacli uses under `--events`). |
+| `FAKE_WACLI_SYNC` | Script for `sync`: segments per attempt separated by `|`, steps by `;`. Steps: an event name (emitted as NDJSON on stderr), `sleep:<ms>`, `exit:<code>`, `crash`, `text` (a non-JSON stderr line), `ignore-term` (stop handling SIGTERM, so only SIGKILL ends the process), `error:<message>` (an `error` event carrying the message, the shape wacli uses under `--events`). |
 | `FAKE_WACLI_SYNC_COUNTER` | File holding the attempt number, so each `sync` spawn gets the next segment. |
 
 The command key is the subcommand path with global flags removed, for

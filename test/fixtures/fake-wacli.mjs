@@ -106,6 +106,7 @@ if (key === 'sync') {
     if (step.startsWith('exit:')) process.exit(Number(step.slice(5)));
     if (step === 'crash') process.exit(1);
     if (step === 'text') { process.stderr.write('connected; history sync 12%\n'); continue; }
+    if (step === 'ignore-term') { process.removeAllListeners('SIGTERM'); process.on('SIGTERM', () => {}); continue; }
     if (step.startsWith('error:')) { process.stderr.write(JSON.stringify({ event: 'error', data: { message: step.slice(6) }, ts: Date.now() }) + '\n'); continue; }
     process.stderr.write(JSON.stringify({ event: step, data: {}, ts: Date.now() }) + '\n');
   }
