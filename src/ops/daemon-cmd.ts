@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { AgentError } from '../errors.js';
-import { resolvePaths } from '../paths.js';
+import { ensureDirs, resolvePaths } from '../paths.js';
 import { loadPolicy } from '../policy/schema.js';
 import { startSupervisor } from './daemon.js';
 import { isGlobalInstall, serviceManagerForThisMachine, servicePathsForThisMachine } from './service.js';
@@ -27,6 +27,7 @@ export function daemonCommand(): Command {
 
   cmd.command('install').description('Install the sync daemon as a login service (launchd or systemd)').action(async () => {
     const paths = resolvePaths();
+    await ensureDirs(paths);
     const sp = servicePathsForThisMachine(paths);
     if (!isGlobalInstall(sp.cliPath)) {
       throw new AgentError('invalid_input', 'daemon install needs a global install so the service has a stable path. Run: npm i -g whatsapp-agent, then: whatsapp-agent daemon install');

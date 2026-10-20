@@ -1,8 +1,8 @@
-import { writeFile } from 'node:fs/promises';
+import { appendFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServiceManager, isGlobalInstall, launchdPlist, launchdPlistPath, systemdUnit, systemdUnitPath, type ServicePaths } from '../../src/ops/service.js';
-import { tailFile } from '../../src/ops/tail.js';
+import { followFile, tailFile } from '../../src/ops/tail.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 const sp: ServicePaths = {
@@ -112,5 +112,16 @@ describe('tailFile', () => {
     expect(await tailFile(f, 2)).toBe('c\nd\n');
     expect(await tailFile(f, 10)).toBe('a\nb\nc\nd\n');
     expect(await tailFile(path.join(tmp, 'missing'), 3)).toBe('');
+  });
+  it('followFile prints only bytes appended after it starts, intact after multi-byte text', async () => {
+    const f = path.join(tmp, 'log');
+    await writeFile(f, 'old line ✓\n');
+    const chunks: string[] = [];
+    const stop = followFile(f, (c) => chunks.push(c), 20);
+    await new Promise((r) => setTimeout(r, 60));
+    await appendFile(f, 'NEWLINE-ONE\n');
+    await new Promise((r) => setTimeout(r, 80));
+    stop();
+    expect(chunks.join('')).toBe('NEWLINE-ONE\n');
   });
 });
