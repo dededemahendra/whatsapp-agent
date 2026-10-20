@@ -17,8 +17,12 @@ export function realIo(input: NodeJS.ReadableStream & { isTTY?: boolean } = proc
       }
       const rl = readline.createInterface({ input, output });
       try {
-        const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
-        return answer === 'y' || answer === 'yes';
+        const closed = new Promise<boolean>((resolve) => { rl.once('close', () => resolve(false)); });
+        const answered = rl.question(`${question} [y/N] `).then((reply) => {
+          const answer = reply.trim().toLowerCase();
+          return answer === 'y' || answer === 'yes';
+        });
+        return await Promise.race([answered, closed]);
       } finally {
         rl.close();
       }

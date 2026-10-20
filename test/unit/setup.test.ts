@@ -392,6 +392,13 @@ describe('realIo', () => {
     expect(await answered('n')).toBe(false);
   });
 
+  it('settles false when the terminal input ends before an answer', async () => {
+    const input = Object.assign(new PassThrough(), { isTTY: true });
+    const pending = realIo(input, sink().out).ask('Q');
+    input.end();
+    expect(await pending).toBe(false);
+  });
+
   it('prints to the injected output with a trailing newline', async () => {
     const s = sink();
     realIo(new PassThrough(), s.out).print('hello');
