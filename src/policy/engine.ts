@@ -90,11 +90,14 @@ export function decide(i: DecideInput): Decision {
     return deny('rate_limited', Math.max(1, Math.ceil(w.rateLimit.minGapSeconds - i.rate.secondsSinceLast)));
   }
 
+  // A decline is final for this call whatever the policy says now: the person was asked and said no, and the policy may have changed since
+  // the prompt (confirm set to never, the recipient allowlisted) so that no prompt would be shown today.
+  if (i.answer === 'declined') return deny('confirmation_declined');
+
   const needsConfirmation = w.confirm === 'always' || (w.confirm === 'unlisted' && !matchesAllow(w.allow, i.recipient));
   if (!needsConfirmation) return { kind: 'allow' };
   if (!i.clientCanConfirm) return deny('confirmation_unavailable');
   if (i.answer === 'none') return { kind: 'confirm' };
-  if (i.answer === 'declined') return deny('confirmation_declined');
   return { kind: 'allow' };
 }
 

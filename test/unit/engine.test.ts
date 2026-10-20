@@ -95,6 +95,29 @@ describe('decide', () => {
     expect(decide(input({ answer: 'accepted' }))).toEqual({ kind: 'allow' });
     expect(decide(input({ answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
   });
+  it('denies a declined answer even when the policy no longer asks for confirmation', () => {
+    // The prompt was shown under one policy and declined; by the time the answer arrives the policy says never, or the person is allowlisted.
+    expect(decide(input({ policy: policy({ confirm: 'never' }), answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
+    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 001'] }), answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
+    expect(decide(input({ policy: policy({ confirm: 'never' }), answer: 'declined', clientCanConfirm: false }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
+    expect(decide(input({ policy: policy({ confirm: 'never', groups: true }), recipient: family, answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
+    expect(decide(input({ tool: 'send_file', fileInsideRoots: true, policy: policy({ confirm: 'never' }), answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
+    expect(decide(input({ tool: 'react', policy: policy({ confirm: 'never' }), answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
+  });
+
+  it('still allows when no confirmation is needed and the answer is an accept or no answer', () => {
+    expect(decide(input({ policy: policy({ confirm: 'never' }), answer: 'none' }))).toEqual({ kind: 'allow' });
+    expect(decide(input({ policy: policy({ confirm: 'never' }), answer: 'accepted' }))).toEqual({ kind: 'allow' });
+    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 001'] }), answer: 'none' }))).toEqual({ kind: 'allow' });
+  });
+
+  it('keeps every earlier rule ahead of a declined answer, and never asks mark_read for one', () => {
+    expect(decide(input({ policy: DEFAULT_POLICY, answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'writes_disabled' });
+    expect(decide(input({ recipient: channel, policy: policy({ confirm: 'never' }), answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'unsupported_target' });
+    expect(decide(input({ recipient: family, policy: policy({ confirm: 'never' }), answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'groups_disabled' });
+    expect(decide(input({ tool: 'mark_read', policy: policy({ confirm: 'never' }), answer: 'declined' }))).toEqual({ kind: 'allow' });
+  });
+
   it('skips confirmation for allowlisted recipients in unlisted mode', () => {
     expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 001'] }) }))).toEqual({ kind: 'allow' });
     expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 002'] }) }))).toEqual({ kind: 'confirm' });

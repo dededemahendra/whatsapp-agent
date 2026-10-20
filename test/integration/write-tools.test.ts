@@ -1043,6 +1043,43 @@ describe('the policy file on disk', () => {
     expect((await h.call('send_text', { to: 'Alice', message: 'back' })).isError).toBeFalsy();
   });
 
+  it('denies a declined answer even though the policy file was changed to stop asking, between the prompt and the answer', async () => {
+    h = await makeHarness({ onDisk: true, manualRounds: true, policy: onDisk() });
+    const policy = h.deps.startupPolicy;
+    await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: true, confirm: 'always' })(policy));
+    const args = { to: 'Alice', message: 'hello' };
+    const decline = { confirm: { action: 'decline' } };
+    const changes: Array<[string, Partial<Policy['writes']>]> = [
+      ['confirm never', { confirm: 'never' }],
+      ['the recipient allowlisted', { confirm: 'unlisted', allow: ['+61 400 000 001'] }],
+    ];
+    for (const [label, change] of changes) {
+      await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: true, confirm: 'always' })(policy));
+      const prompt = await h.callRound('send_text', args);
+      expect(prompt.resultType, label).toBe('input_required');
+      await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: true, ...change })(policy));
+      const declined = await h.callRound('send_text', args, { inputResponses: decline, requestState: prompt.requestState });
+      expect(declined.isError, label).toBe(true);
+      expect(JSON.parse(declined.content![0]!.text!), label).toMatchObject({ error: 'confirmation_declined' });
+      expect(await sendArgv(), label).toHaveLength(0);
+      expect(h.audits.at(-1), label).toMatchObject({ tool: 'send_text', outcome: 'denied', reason: 'confirmation_declined' });
+    }
+    // The same answer a person gives with the box unticked, or by cancelling, is a decline too.
+    for (const answer of [{ action: 'cancel' }, { action: 'accept', content: { confirm: false } }]) {
+      await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: true, confirm: 'always' })(policy));
+      const prompt = await h.callRound('send_text', args);
+      await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: true, confirm: 'never' })(policy));
+      const declined = await h.callRound('send_text', args, { inputResponses: { confirm: answer }, requestState: prompt.requestState });
+      expect(JSON.parse(declined.content![0]!.text!)).toMatchObject({ error: 'confirmation_declined' });
+    }
+    expect(await sendArgv()).toHaveLength(0);
+
+    // With no prompt before it, the same policy simply sends.
+    await savePolicy(h.deps.paths.policyFile, onDisk({ enabled: true, confirm: 'never' })(policy));
+    expect((await h.callRound('send_text', args)).isError).toBeFalsy();
+    expect(await sendArgv()).toHaveLength(1);
+  });
+
   it('refuses every write while the file has a value the schema rejects', async () => {
     h = await makeHarness({ onDisk: true, policy: onDisk({ enabled: true, confirm: 'never' }) });
     await writeFile(h.deps.paths.policyFile, JSON.stringify({ ...h.deps.startupPolicy, writes: { ...h.deps.startupPolicy.writes, confirm: 'sometimes' } }));
