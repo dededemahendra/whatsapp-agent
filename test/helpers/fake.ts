@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,14 @@ export async function makeTmp(prefix = 'wa-test-'): Promise<string> {
 
 export async function removeTmp(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true });
+}
+
+/** Copies the stock fixtures into a new temp directory and overwrites the named files, for tests that need another canned response. The caller removes the directory. */
+export async function fixturesWith(overrides: Record<string, string>): Promise<string> {
+  const dir = await makeTmp('wa-fixtures-');
+  await cp(FIXTURES, dir, { recursive: true });
+  for (const [name, body] of Object.entries(overrides)) await writeFile(path.join(dir, name), body);
+  return dir;
 }
 
 /** Environment for spawning the fake. Strips inherited wacli variables the runner must set itself, and the whatsapp-agent overrides (binary, config and data directories, log level) so a developer's own setup cannot leak into a test; values passed in `extra` are kept. */

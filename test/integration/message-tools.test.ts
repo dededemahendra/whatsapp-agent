@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { sniffImageMime } from '../../src/mcp/tools/media.js';
 import type { RunOptions, Runner } from '../../src/wacli/runner.js';
+import { fixturesWith, removeTmp } from '../helpers/fake.js';
 import { errorOf, makeHarness, type Harness } from '../helpers/harness.js';
 
 let h: Harness;
@@ -55,6 +56,24 @@ describe('read_messages', () => {
     await h.call('read_messages', { chat: '61400000001@s.whatsapp.net', limit: 10, before: '2026-10-19', after: '2026-10-01T00:00:00Z', cursor: 'cur_abc' });
     const recs = await h.argv();
     expect(recs[1]!.argv.slice(4)).toEqual(['messages', 'list', '--chat=61400000001@s.whatsapp.net', '--limit=10', '--before=2026-10-19', '--after=2026-10-01T00:00:00Z', '--cursor=cur_abc']);
+  });
+});
+
+describe('revoked messages', () => {
+  it('reach the agent without their text or media', async () => {
+    const revoked = { ChatJID: ALICE, MsgID: 'MSG9', SenderJID: ALICE, SenderName: 'Alice', Timestamp: '2026-10-19T10:30:00Z', FromMe: false, Text: 'withdrawn words', DisplayText: '[image] withdrawn words', MediaType: 'image', MediaCaption: 'withdrawn words', MimeType: 'image/jpeg', Edited: false, Revoked: true };
+    const body = { success: true, data: { messages: [revoked], fts: true, page: { has_more: false, next_cursor: null }, source: { last_sync_at: null, scope: 'local_archive' } }, error: null };
+    const dir = await fixturesWith({ 'messages_list.json': JSON.stringify(body) });
+    try {
+      h = await makeHarness({ env: { FAKE_WACLI_FIXTURES: dir } });
+      const r = await h.call('read_messages', { chat: 'Alice' });
+      expect(r.isError).toBeFalsy();
+      const [m] = (r.structuredContent as { messages: Array<Record<string, unknown>> }).messages;
+      expect(m).toMatchObject({ id: 'MSG9', revoked: true, text: null, media: null });
+      expect(JSON.stringify(r)).not.toContain('withdrawn words');
+    } finally {
+      await removeTmp(dir);
+    }
   });
 });
 

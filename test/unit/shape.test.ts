@@ -57,6 +57,20 @@ describe('toMessage', () => {
   });
 });
 
+describe('toMessage with a revoked message', () => {
+  it('drops the text and media but keeps every other field and the revoked flag', () => {
+    const m = toMessage({
+      ChatJID: '1@s.whatsapp.net', MsgID: 'MSG4', SenderJID: '2@s.whatsapp.net', SenderName: 'Alice', Timestamp: '2026-10-19T10:00:00Z', FromMe: false,
+      Text: 'words that were withdrawn', DisplayText: '[image] withdrawn', MediaType: 'image', MediaCaption: 'withdrawn caption', Filename: 'p.jpg', MimeType: 'image/jpeg',
+      quoted_msg_id: 'MSG0', quoted_sender_jid: '1@s.whatsapp.net', Edited: true, Revoked: true,
+    });
+    expect(m).toEqual({
+      id: 'MSG4', chat_jid: '1@s.whatsapp.net', sender_jid: '2@s.whatsapp.net', sender_name: 'Alice', from_me: false, timestamp: '2026-10-19T10:00:00.000Z',
+      text: null, media: null, reply_to: { id: 'MSG0', sender_jid: '1@s.whatsapp.net' }, edited: true, revoked: true,
+    });
+  });
+});
+
 describe('contacts, groups, participants, phones', () => {
   it('maps a contact', () => {
     expect(toContact({ jid: '1@s.whatsapp.net', phone: '+61400000001', name: 'Alice Example', alias: '', system_name: 'Alice' }))

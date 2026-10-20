@@ -95,6 +95,7 @@ export function toChat(raw: WacliChat, now: Date = new Date()): AgentChat {
 
 export function toMessage(raw: WacliMessage): AgentMessage {
   const type = nonEmpty(raw.MediaType);
+  const revoked = Boolean(raw.Revoked);
   return {
     id: raw.MsgID,
     chat_jid: raw.ChatJID,
@@ -102,11 +103,12 @@ export function toMessage(raw: WacliMessage): AgentMessage {
     sender_name: nonEmpty(raw.SenderName),
     from_me: Boolean(raw.FromMe),
     timestamp: toIso(raw.Timestamp),
-    text: nonEmpty(raw.Text) ?? nonEmpty(raw.DisplayText),
-    media: type ? { type, caption: nonEmpty(raw.MediaCaption), filename: nonEmpty(raw.Filename), mime: nonEmpty(raw.MimeType) } : null,
+    // A revoked message was withdrawn by its sender; wacli may still hold the content, but the agent must not see it.
+    text: revoked ? null : (nonEmpty(raw.Text) ?? nonEmpty(raw.DisplayText)),
+    media: type && !revoked ? { type, caption: nonEmpty(raw.MediaCaption), filename: nonEmpty(raw.Filename), mime: nonEmpty(raw.MimeType) } : null,
     reply_to: raw.quoted_msg_id ? { id: raw.quoted_msg_id, sender_jid: nonEmpty(raw.quoted_sender_jid) } : null,
     edited: Boolean(raw.Edited),
-    revoked: Boolean(raw.Revoked),
+    revoked,
   };
 }
 
