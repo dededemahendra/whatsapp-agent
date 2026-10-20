@@ -296,6 +296,16 @@ describe('design spec', () => {
     expect(algorithm.match(/A30/g)).toHaveLength(1);
   });
 
+  it('says in A22 and in the error table that an ambiguous_recipient payload carries total, and when the message says the list was cut', async () => {
+    const spec = await read(SPEC);
+    const bullets = spec.slice(spec.indexOf('## 16. Amendments')).split(/\n(?=- A\d+\. )/).slice(1);
+    const a22 = bullets.find((b) => b.startsWith('- A22. '));
+    expect(a22, 'amendment A22').toBeDefined();
+    expect(flat(a22!)).toBe('- A22. Name lookups request 50 rows from both `chats list --query` and `contacts search`, so an exact match is not missed behind partial ones; the `ambiguous_recipient` payload still carries at most 10 candidates. The payload also carries `total`, the full number of matches before the cap of 10, and the message says "Showing the first 10." when the list was cut.');
+    const row = spec.split('\n').find((l) => l.startsWith('| `ambiguous_recipient` |'));
+    expect(row).toBe('| `ambiguous_recipient` | several matches | candidates list and `total`, the full number of matches before the cap of 10; the message says "Showing the first 10." when the list was cut |');
+  });
+
   it('changes nothing else in sections 1 to 15 of the spec that A27 to A30 do not replace', async () => {
     const spec = await read(SPEC);
     expect(spec).toContain('The SDK\'s legacy shim serves pre-2026 clients that do');

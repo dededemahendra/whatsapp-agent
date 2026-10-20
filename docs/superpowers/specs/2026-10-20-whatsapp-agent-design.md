@@ -480,7 +480,7 @@ Directories are created 0700, files 0600.
 | `rate_limited` | window or gap exceeded | retry after N seconds |
 | `confirmation_unavailable` | host cannot show forms | allowlist or change confirm |
 | `confirmation_declined` | person said no | nothing was sent |
-| `ambiguous_recipient` | several matches | candidates list |
+| `ambiguous_recipient` | several matches | candidates list and `total`, the full number of matches before the cap of 10; the message says "Showing the first 10." when the list was cut |
 | `not_found` | chat, message or media missing | check id |
 | `timeout` | wacli exceeded its budget | retry; outcome of a send may be uncertain |
 | `wacli_error` | any other non-zero exit | exit code and stderr tail |
@@ -695,7 +695,9 @@ overrides the earlier text where they differ.
   crashes still are. A stop request interrupts a backoff sleep.
 - A22. Name lookups request 50 rows from both `chats list --query` and
   `contacts search`, so an exact match is not missed behind partial ones; the
-  `ambiguous_recipient` payload still carries at most 10 candidates.
+  `ambiguous_recipient` payload still carries at most 10 candidates. The payload
+  also carries `total`, the full number of matches before the cap of 10, and the
+  message says "Showing the first 10." when the list was cut.
 - A23. Write tools resolve names exactly: a name is accepted only on an exact
   case-insensitive, trimmed, NFC-normalised match on a chat name or a contact's
   name, alias or system name, and a lone partial match is `ambiguous_recipient`
