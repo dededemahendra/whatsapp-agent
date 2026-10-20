@@ -1102,6 +1102,10 @@ describe('pure helpers', () => {
     expect(() => parseEnvelope('{"success":false,"data":null,"error":"not authenticated; run `wacli auth`"}', '')).toThrowError(expect.objectContaining({ code: 'not_authenticated' }));
   });
 
+  it('parseEnvelope accepts a pretty-printed multi-line envelope', () => {
+    expect(parseEnvelope<number[]>('{\n  "success": true,\n  "data": [1, 2],\n  "error": null\n}\n', '')).toEqual([1, 2]);
+  });
+
   it('classifyFailure prefers the stderr envelope and falls back to the exit code', () => {
     expect(classifyFailure(1, '', '{"success":false,"data":null,"error":"store is locked (another wacli is running?)"}').code).toBe('store_locked');
     expect(classifyFailure(3, '', '').message).toBe('wacli exited with code 3');
@@ -1219,12 +1223,15 @@ export function classifyMessage(message: string, stderr = ''): AgentError {
 }
 
 export function parseEnvelope<T>(stdout: string, stderr: string): T {
-  const line = lastNonEmptyLine(stdout);
   let env: Envelope;
   try {
-    env = JSON.parse(line) as Envelope;
+    env = JSON.parse(stdout.trim()) as Envelope;
   } catch {
-    throw new AgentError('wacli_error', 'wacli returned output that is not JSON', { stderr_tail: tail(stderr) });
+    try {
+      env = JSON.parse(lastNonEmptyLine(stdout)) as Envelope;
+    } catch {
+      throw new AgentError('wacli_error', 'wacli returned output that is not JSON', { stderr_tail: tail(stderr) });
+    }
   }
   if (!env.success) throw classifyMessage(env.error ?? 'wacli reported failure', stderr);
   return env.data as T;
@@ -1274,7 +1281,7 @@ export function createRunner(cfg: RunnerConfig): Runner {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/runner.test.ts && pnpm typecheck`
-Expected: PASS (13 tests). The timeout test takes about 0.3 s; the oversized-output test about 1 s.
+Expected: PASS (14 tests). The timeout test takes about 0.3 s; the oversized-output test about 1 s.
 
 - [ ] **Step 5: Commit**
 
