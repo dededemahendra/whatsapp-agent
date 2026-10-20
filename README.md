@@ -155,7 +155,7 @@ Common cases:
 | `WHATSAPP_AGENT_DATA_DIR` | Media, audit and rate-limit state (default `~/.local/share/whatsapp-agent`). The value is made absolute, and `~` is accepted |
 | `WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE` | `1` lets `daemon install` run from a checkout that is not a global install |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Used for the defaults above when the specific overrides are unset |
-| `WHATSAPP_AGENT_LOG` | `debug` prints diagnostics on stderr (never message text) |
+| `WHATSAPP_AGENT_LOG` | `debug` prints diagnostics on stderr (never message text). Debug lines print only at that level, and one warning line is printed on stderr whenever a sent row cannot be written to the audit log, at any level. |
 
 ## Development
 

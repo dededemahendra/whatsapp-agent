@@ -232,6 +232,15 @@ describe('README', () => {
     expect(readme).toContain('A confirmation prompt that is never answered leaves no row.');
   });
 
+  it('says in the WHATSAPP_AGENT_LOG row that debug lines need that level and that a lost sent row always warns', async () => {
+    const readme = await read('README.md');
+    const row = readme.split('\n').find((l) => l.startsWith('| `WHATSAPP_AGENT_LOG` |'));
+    expect(row, 'the WHATSAPP_AGENT_LOG row').toBeDefined();
+    expect(flat(row!)).toContain('Debug lines print only at that level, and one warning line is printed on stderr whenever a sent row cannot be written to the audit log, at any level.');
+    expect(row).toContain('never message text');
+    expect(row!.match(/\|/g)).toHaveLength(3); // still a two-cell table row
+  });
+
   it('says a confirmation has to be answered within five minutes', async () => {
     expect(flat(await read('README.md'))).toContain('A confirmation must be answered within five minutes. After that the host reports an error and the agent has to ask again.');
   });
