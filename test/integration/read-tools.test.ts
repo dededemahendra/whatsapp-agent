@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { INSTRUCTIONS } from '../../src/mcp/server.js';
+import { fixturesWith, removeTmp } from '../helpers/fake.js';
 import { errorOf, makeHarness, type Harness } from '../helpers/harness.js';
 
 let h: Harness;
@@ -124,12 +125,63 @@ describe('groups', () => {
     h = await makeHarness();
     const r = await h.call('get_group', { group: 'Family' });
     expect(r.structuredContent).toMatchObject({
-      jid: '120363000000000001@g.us', name: 'Family', owner_jid: '61400000002@s.whatsapp.net', participant_count: 2,
+      jid: '120363000000000001@g.us', name: 'Family', owner_jid: '61400000002@s.whatsapp.net', participant_count: 2, participants_truncated: false,
       participants: [{ jid: '61400000002@s.whatsapp.net', role: 'admin', is_admin: true }, { jid: '61400000001@s.whatsapp.net', role: 'member', is_admin: false }],
     });
     const recs = await h.argv();
     expect(recs.map((x) => x.key)).toEqual(['chats list', 'groups list', 'groups participants list']);
     expect(recs[2]!.argv.slice(4)).toEqual(['groups', 'participants', 'list', '--jid=120363000000000001@g.us']);
+  });
+
+  describe('participant cap', () => {
+    const GROUP = '120363000000000001@g.us';
+    const rows = (n: number) => Array.from({ length: n }, (_, i) => ({
+      group_jid: GROUP, user_jid: `614000${String(i).padStart(5, '0')}@s.whatsapp.net`, role: i === 0 ? 'admin' : 'member', updated_at: '2026-10-19T09:00:00Z',
+    }));
+    type GroupOut = { participant_count: number; participants: Array<{ jid: string }>; participants_truncated: boolean };
+
+    async function groupWith(n: number): Promise<GroupOut> {
+      const dir = await fixturesWith({ 'groups_participants_list.json': JSON.stringify({ success: true, data: rows(n), error: null }) });
+      try {
+        h = await makeHarness({ env: { FAKE_WACLI_FIXTURES: dir } });
+        return (await h.call('get_group', { group: 'Family' })).structuredContent as GroupOut;
+      } finally {
+        await removeTmp(dir);
+      }
+    }
+
+    it('returns at most the result limit, keeps the true total and says the list was cut', async () => {
+      const g = await groupWith(60);
+      expect(g.participant_count).toBe(60);
+      expect(g.participants).toHaveLength(50);
+      expect(g.participants[0]!.jid).toBe('61400000000@s.whatsapp.net');
+      expect(g.participants[49]!.jid).toBe('61400000049@s.whatsapp.net');
+      expect(g.participants_truncated).toBe(true);
+    });
+
+    it('does not call a list that exactly fills the limit truncated', async () => {
+      const g = await groupWith(50);
+      expect(g.participant_count).toBe(50);
+      expect(g.participants).toHaveLength(50);
+      expect(g.participants_truncated).toBe(false);
+    });
+
+    it('follows the policy limit', async () => {
+      h = await makeHarness({ policy: (p) => ({ ...p, limits: { ...p.limits, maxResults: 1 } }) });
+      const g = (await h.call('get_group', { group: 'Family' })).structuredContent as GroupOut;
+      expect(g).toMatchObject({ participant_count: 2, participants_truncated: true });
+      expect(g.participants).toHaveLength(1);
+    });
+
+    it('describes the cap in the tool description and the output schema', async () => {
+      h = await makeHarness();
+      const tool = (await h.client.listTools()).tools.find((t) => t.name === 'get_group')!;
+      expect(tool.description).toMatch(/participant_count/);
+      expect(tool.description).toMatch(/participants_truncated/);
+      const props = (tool.outputSchema as { properties: Record<string, unknown>; required: string[] });
+      expect(props.properties).toHaveProperty('participants_truncated');
+      expect(props.required).toContain('participants_truncated');
+    });
   });
 
   it('refuses a non-group target', async () => {

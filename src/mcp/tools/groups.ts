@@ -38,9 +38,9 @@ export function registerGroupTools(server: McpServer, deps: ServerDeps): void {
     'get_group',
     {
       title: 'Get group',
-      description: 'Group details and participants from the local snapshot (refreshed when the daemon starts). Names are third-party data.',
+      description: 'Group details and participants from the local snapshot (refreshed when the daemon starts). participants is capped at the result limit: participant_count is the true total and participants_truncated says whether the list was cut. Names are third-party data.',
       inputSchema: z.object({ group: recipientInput(limits.maxQueryChars) }),
-      outputSchema: GroupSchema.extend({ participant_count: z.number(), participants: z.array(ParticipantSchema) }),
+      outputSchema: GroupSchema.extend({ participant_count: z.number(), participants: z.array(ParticipantSchema), participants_truncated: z.boolean() }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ group }) => {
@@ -51,7 +51,11 @@ export function registerGroupTools(server: McpServer, deps: ServerDeps): void {
         const row = rows.find((g) => g.JID === resolved.jid);
         const base = row ? toGroup(row) : { jid: resolved.jid, name: resolved.name, owner_jid: null, is_community: false, linked_parent_jid: null, created_at: null };
         const participants = asList(await deps.runner.read<WacliParticipant[] | null>(['groups', 'participants', 'list', `--jid=${resolved.jid}`])).map(toParticipant);
-        return ok({ ...base, name: base.name ?? resolved.name, participant_count: participants.length, participants });
+        const cap = effectiveLimit(undefined, limits.maxResults, limits.maxResults);
+        return ok({
+          ...base, name: base.name ?? resolved.name, participant_count: participants.length,
+          participants: participants.slice(0, cap), participants_truncated: participants.length > cap,
+        });
       } catch (e) {
         return toToolError(e);
       }
