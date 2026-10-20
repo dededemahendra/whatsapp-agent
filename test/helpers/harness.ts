@@ -8,7 +8,7 @@ import { appendAudit, type AuditRecord } from '../../src/policy/audit.js';
 import { createRateLimiter } from '../../src/policy/ratelimit.js';
 import { DEFAULT_POLICY, type Policy } from '../../src/policy/schema.js';
 import { createResolver } from '../../src/wacli/resolve.js';
-import { createRunner } from '../../src/wacli/runner.js';
+import { createRunner, type RunOptions, type Runner } from '../../src/wacli/runner.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, readArgvLog, removeTmp, type ArgvRecord } from './fake.js';
 
 export interface ToolResult {
@@ -93,4 +93,10 @@ export async function makeHarness(opts: HarnessOptions = {}): Promise<Harness> {
       await removeTmp(tmp);
     },
   };
+}
+
+/** Sends writes through `write` while reads still reach the fake wacli. Call it after makeHarness; the tools look the runner up on every call. */
+export function stubWrite(h: Harness, write: (args: string[], opts?: RunOptions) => Promise<unknown>): void {
+  const original = h.deps.runner;
+  h.deps.runner = { bin: original.bin, read: original.read, version: original.version, write: write as Runner['write'] };
 }

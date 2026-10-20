@@ -26,6 +26,36 @@ function serialised<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
+/** Writes between the gate letting them through and their last audit row. A stop waits for these (see drainInFlight) so a send is not cut off before it is recorded. */
+let inFlight = 0;
+const idleWaiters = new Set<() => void>();
+
+/** Counts one write as in flight. The function it returns ends it, and may be called more than once. */
+function hold(): () => void {
+  inFlight += 1;
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    inFlight -= 1;
+    if (inFlight === 0) for (const wake of [...idleWaiters]) wake();
+  };
+}
+
+/** Resolves when no write is in flight, or after `timeoutMs`, whichever comes first. */
+export function drainInFlight(timeoutMs: number): Promise<void> {
+  if (inFlight === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      idleWaiters.delete(done);
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    idleWaiters.add(done);
+  });
+}
+
 export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   const { limits } = deps.startupPolicy;
   const label = (r: Resolved) => (r.name ? `${r.name} (${r.jid})` : r.jid);
@@ -82,11 +112,13 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     },
     async (a, ctx): Promise<CallToolResult | InputRequiredResult> => {
       let recipient: Resolved | null = null;
+      let release: (() => void) | null = null;
       try {
         recipient = await deps.resolver.resolve(a.to);
         const d = await gate(ctx, 'send_text', recipient);
         if (d.kind === 'deny') return denied('send_text', recipient, d, { text: a.message });
         if (d.kind === 'confirm') return confirmationRequired(`Send to ${label(recipient)}?\n\n${a.message}`);
+        release = hold();
         const argv = ['send', 'text', `--to=${recipient.jid}`, `--message=${a.message}`];
         if (a.reply_to) argv.push(`--reply-to=${a.reply_to}`);
         if (a.reply_to_sender) argv.push(`--reply-to-sender=${a.reply_to_sender}`);
@@ -96,7 +128,9 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         await record({ ...base('send_text', recipient), outcome: 'sent', message_id: res.id, text: a.message });
         return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
-        return failed('send_text', recipient, e, { text: a.message });
+        return await failed('send_text', recipient, e, { text: a.message });
+      } finally {
+        release?.();
       }
     },
   );
@@ -118,6 +152,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     },
     async (a, ctx): Promise<CallToolResult | InputRequiredResult> => {
       let recipient: Resolved | null = null;
+      let release: (() => void) | null = null;
       try {
         recipient = await deps.resolver.resolve(a.to);
         const policy = await deps.loadPolicy();
@@ -128,6 +163,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
           const size = await stat(a.path).then((s) => `${s.size} bytes`).catch(() => 'unknown size');
           return confirmationRequired(`Send file to ${label(recipient)}?\n\n${a.path} (${size})${a.caption ? `\n${a.caption}` : ''}`);
         }
+        release = hold();
         const argv = ['send', 'file', `--to=${recipient.jid}`, `--file=${a.path}`];
         if (a.caption) argv.push(`--caption=${a.caption}`);
         if (a.as && a.as !== 'auto') argv.push(`--as=${a.as}`);
@@ -137,7 +173,9 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         await record({ ...base('send_file', recipient), outcome: 'sent', message_id: res.id, file: a.path, text: a.caption });
         return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
-        return failed('send_file', recipient, e, { file: a.path });
+        return await failed('send_file', recipient, e, { file: a.path });
+      } finally {
+        release?.();
       }
     },
   );
@@ -158,18 +196,22 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     },
     async (a, ctx): Promise<CallToolResult | InputRequiredResult> => {
       let recipient: Resolved | null = null;
+      let release: (() => void) | null = null;
       try {
         recipient = await deps.resolver.resolve(a.chat);
         const d = await gate(ctx, 'react', recipient);
         if (d.kind === 'deny') return denied('react', recipient, d, { reaction: a.reaction, message_id: a.message_id });
         if (d.kind === 'confirm') return confirmationRequired(`React with ${a.reaction || '(clear reaction)'} to message ${a.message_id} in ${label(recipient)}?`);
+        release = hold();
         const argv = ['send', 'react', `--to=${recipient.jid}`, `--id=${a.message_id}`, `--reaction=${a.reaction}`];
         if (a.sender) argv.push(`--sender=${a.sender}`);
         const res = await deps.runner.write<WacliSendResult>(argv);
         await record({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
         return ok({ sent: true, message_id: res.id, to: recipient });
       } catch (e) {
-        return failed('react', recipient, e, { reaction: a.reaction, message_id: a.message_id });
+        return await failed('react', recipient, e, { reaction: a.reaction, message_id: a.message_id });
+      } finally {
+        release?.();
       }
     },
   );
@@ -185,15 +227,19 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     },
     async (a, ctx): Promise<CallToolResult> => {
       let recipient: Resolved | null = null;
+      let release: (() => void) | null = null;
       try {
         recipient = await deps.resolver.resolve(a.chat);
         const d = await gate(ctx, 'mark_read', recipient);
         if (d.kind === 'deny') return denied('mark_read', recipient, d, {});
+        release = hold();
         await deps.runner.write<WacliChatStateResult>(['chats', 'mark-read', `--chat=${recipient.jid}`], { idempotent: true });
         await record({ ...base('mark_read', recipient), outcome: 'sent' });
         return ok({ ok: true, chat: recipient });
       } catch (e) {
-        return failed('mark_read', recipient, e, {});
+        return await failed('mark_read', recipient, e, {});
+      } finally {
+        release?.();
       }
     },
   );
