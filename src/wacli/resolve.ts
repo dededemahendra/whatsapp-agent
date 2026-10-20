@@ -74,7 +74,9 @@ export function pickUnique(candidates: Matchable[], input: string, opts: Resolve
     if (!namesOf(only).some(([, v]) => v.includes(needle))) return { kind: 'none' };
     return opts.exact ? { kind: 'partial', candidate: labelled(only, needle) } : { kind: 'one', value: plain(only) };
   }
-  return { kind: 'many', candidates: candidates.slice(0, 10).map((c) => labelled(c, needle)) };
+  // Exact matches first, each group in lookup order, and the cap after that: a crowd of partial matches must not push an exact one out of the list.
+  const ordered = [...exact, ...candidates.filter((c) => !exact.includes(c))];
+  return { kind: 'many', candidates: ordered.slice(0, 10).map((c) => labelled(c, needle)) };
 }
 
 function ambiguous(input: string, candidates: Candidate[]): AgentError {

@@ -430,3 +430,62 @@ describe('exact resolution for writes', () => {
     expect(pickUnique([only], "dave's plumbing", { exact: true })).toEqual({ kind: 'one', value: only });
   });
 });
+
+describe('exact matches come first among the candidates', () => {
+  const chat = (n: number, name: string) =>
+    ({ jid: `1203630000000${String(n).padStart(5, '0')}@g.us`, kind: 'group', name, last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 });
+  const contact = (n: number, name: string, alias = '', system_name = '') =>
+    ({ jid: `614000${String(n).padStart(5, '0')}@s.whatsapp.net`, phone: `+614000${String(n).padStart(5, '0')}`, name, alias, system_name, updated_at: '2026-10-19T08:00:00Z' });
+  const envelope = (rows: unknown[]) => JSON.stringify({ success: true, data: rows, error: null });
+
+  async function candidatesFor(files: Record<string, string>, input: string, extra: Record<string, string> = {}, opts: { exact?: boolean } = {}): Promise<Array<{ jid: string; name: string | null; matched_on?: string }>> {
+    const dir = await fixturesWith(files);
+    try {
+      const err = await resolver({ FAKE_WACLI_FIXTURES: dir, ...extra }).resolve(input, opts).catch((e: unknown) => e) as { code: string; details: { candidates: Array<{ jid: string; name: string | null }> } };
+      expect(err.code).toBe('ambiguous_recipient');
+      return err.details.candidates;
+    } finally {
+      await removeTmp(dir);
+    }
+  }
+
+  it('lists two exact chats ahead of twelve partial ones listed before them, and then caps at 10', async () => {
+    const rows = [...Array.from({ length: 12 }, (_, i) => chat(i + 1, `Zed ${i + 1}`)), chat(101, 'Zed'), chat(102, 'zed')];
+    const candidates = await candidatesFor({ 'chats_list.json': envelope(rows) }, 'zed');
+    expect(candidates).toHaveLength(10);
+    expect(candidates.slice(0, 2).map((c) => c.jid)).toEqual([rows[12]!.jid, rows[13]!.jid]);
+    expect(candidates.slice(2).map((c) => c.name)).toEqual(['Zed 1', 'Zed 2', 'Zed 3', 'Zed 4', 'Zed 5', 'Zed 6', 'Zed 7', 'Zed 8']);
+  });
+
+  it('keeps lookup order inside each group', async () => {
+    const rows = [chat(1, 'Zed One'), chat(2, 'Zed'), chat(3, 'Zed Two'), chat(4, 'ZED'), chat(5, 'Zed Three')];
+    const candidates = await candidatesFor({ 'chats_list.json': envelope(rows) }, 'zed');
+    expect(candidates.map((c) => c.name)).toEqual(['Zed', 'ZED', 'Zed One', 'Zed Two', 'Zed Three']);
+  });
+
+  it('counts an exact alias or system name as exact, and keeps the label', async () => {
+    const rows = [contact(1, 'Zedd One'), contact(2, 'Zedd Two'), contact(3, 'Robert', 'Zed'), contact(4, 'Maria', '', 'ZED'), contact(5, 'Zedd Three')];
+    const candidates = await candidatesFor({ 'contacts_search.json': envelope(rows) }, 'zed', { FAKE_WACLI_EMPTY: 'chats list' });
+    expect(candidates.map((c) => [c.name, c.matched_on])).toEqual([['Robert', 'alias'], ['Maria', 'system_name'], ['Zedd One', 'name'], ['Zedd Two', 'name'], ['Zedd Three', 'name']]);
+  });
+
+  it('puts the exact ones first when a write asks for an exact name too', async () => {
+    const rows = [chat(1, 'Zed One'), chat(2, 'Zed Two'), chat(3, 'Zed'), chat(4, 'Zed')];
+    const candidates = await candidatesFor({ 'chats_list.json': envelope(rows) }, 'zed', {}, { exact: true });
+    expect(candidates.map((c) => c.name)).toEqual(['Zed', 'Zed', 'Zed One', 'Zed Two']);
+  });
+
+  it('leaves the order alone when nothing matches exactly', async () => {
+    const rows = Array.from({ length: 12 }, (_, i) => chat(i + 1, `Zed ${i + 1}`));
+    const candidates = await candidatesFor({ 'chats_list.json': envelope(rows) }, 'zed');
+    expect(candidates.map((c) => c.name)).toEqual(rows.slice(0, 10).map((c) => c.name));
+  });
+
+  it('pickUnique orders the same way', () => {
+    const mk = (jid: string, name: string) => ({ jid, name, kind: 'user' as const });
+    const rows = [mk('a@s.whatsapp.net', 'Zed A'), mk('b@s.whatsapp.net', 'Zed B'), mk('c@s.whatsapp.net', 'Zed'), mk('d@s.whatsapp.net', 'zed ')];
+    const r = pickUnique(rows, 'zed');
+    expect(r.kind).toBe('many');
+    if (r.kind === 'many') expect(r.candidates.map((c) => c.jid)).toEqual(['c@s.whatsapp.net', 'd@s.whatsapp.net', 'a@s.whatsapp.net', 'b@s.whatsapp.net']);
+  });
+});
