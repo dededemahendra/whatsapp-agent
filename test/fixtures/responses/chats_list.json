@@ -1,0 +1,4 @@
+{"success":true,"data":[
+ {"jid":"120363000000000001@g.us","kind":"group","name":"Family","last_message_ts":"2026-10-19T09:00:00Z","archived":false,"pinned":true,"muted_until":0,"unread":true,"unread_count":3},
+ {"jid":"61400000001@s.whatsapp.net","kind":"dm","name":"Alice","last_message_ts":"2026-10-19T10:05:00Z","archived":false,"pinned":false,"muted_until":0,"unread":false,"unread_count":0}
+],"error":null}

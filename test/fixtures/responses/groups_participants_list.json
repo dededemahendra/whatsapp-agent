@@ -1,0 +1,4 @@
+{"success":true,"data":[
+ {"group_jid":"120363000000000001@g.us","user_jid":"61400000002@s.whatsapp.net","role":"admin","updated_at":"2026-10-19T09:00:00Z"},
+ {"group_jid":"120363000000000001@g.us","user_jid":"61400000001@s.whatsapp.net","role":"member","updated_at":"2026-10-19T09:00:00Z"}
+],"error":null}

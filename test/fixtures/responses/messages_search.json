@@ -1,0 +1,3 @@
+{"success":true,"data":{"messages":[
+ {"ChatJID":"61400000001@s.whatsapp.net","ChatName":"Alice","MsgID":"MSG1","SenderJID":"61400000001@s.whatsapp.net","SenderName":"Alice","Timestamp":"2026-10-19T10:00:00Z","FromMe":false,"Text":"Lunch tomorrow?","DisplayText":"Lunch tomorrow?","MediaType":"","Edited":false,"Revoked":false,"Snippet":"<b>Lunch</b> tomorrow?"}
+],"fts":true,"page":{"has_more":false,"next_cursor":null},"source":{"last_sync_at":"2026-10-19T10:06:00Z","scope":"local_archive"}},"error":null}

@@ -1,0 +1,5 @@
+{"success":true,"data":{"chat_jid":"61400000001@s.whatsapp.net","msg_id":"MSG1","messages":[
+ {"ChatJID":"61400000001@s.whatsapp.net","MsgID":"MSG0","SenderJID":"61400000000@s.whatsapp.net","SenderName":"","Timestamp":"2026-10-19T09:58:00Z","FromMe":true,"Text":"Free tomorrow?","DisplayText":"Free tomorrow?","MediaType":"","Edited":false,"Revoked":false},
+ {"ChatJID":"61400000001@s.whatsapp.net","MsgID":"MSG1","SenderJID":"61400000001@s.whatsapp.net","SenderName":"Alice","Timestamp":"2026-10-19T10:00:00Z","FromMe":false,"Text":"Lunch tomorrow?","DisplayText":"Lunch tomorrow?","MediaType":"","Edited":false,"Revoked":false},
+ {"ChatJID":"61400000001@s.whatsapp.net","MsgID":"MSG2","SenderJID":"61400000000@s.whatsapp.net","SenderName":"","Timestamp":"2026-10-19T10:05:00Z","FromMe":true,"Text":"See you then","DisplayText":"See you then","MediaType":"","Edited":false,"Revoked":false}
+]},"error":null}
