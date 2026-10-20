@@ -3786,6 +3786,42 @@ describe('send_text', () => {
     expect(await sendArgv()).toHaveLength(2);
   });
 
+  it('re-checks every rule when the confirmation answer arrives', async () => {
+    h = await makeHarness({
+      policy: enabled(),
+      elicit: () => {
+        h.deps.startupPolicy.writes.enabled = false;
+        return { action: 'accept', content: { confirm: true } };
+      },
+    });
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(errorOf(r).error).toBe('writes_disabled');
+    expect(h.elicitations).toHaveLength(1);
+    expect(await sendArgv()).toHaveLength(0);
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'denied', reason: 'writes_disabled' });
+    await h.close();
+
+    h = await makeHarness({
+      policy: enabled(),
+      elicit: () => {
+        h.deps.startupPolicy.writes.rateLimit.perHour = 0;
+        return { action: 'accept', content: { confirm: true } };
+      },
+    });
+    const limited = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(errorOf(limited)).toMatchObject({ error: 'rate_limited', retry_after_seconds: expect.any(Number) });
+    expect(await sendArgv()).toHaveLength(0);
+  });
+
+  it('reports a completed send as sent even when the audit log cannot be written', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    h.deps.audit = async () => { throw new Error('ENOSPC: no space left on device'); };
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0001' });
+    expect(await sendArgv()).toHaveLength(1);
+  });
+
   it('reports an ambiguous recipient and a wacli failure as failed audits', async () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
     expect(errorOf(await h.call('send_text', { to: 'a', message: 'x' })).error).toBe('ambiguous_recipient');
@@ -3915,6 +3951,7 @@ import path from 'node:path';
 import type { CallToolResult, InputRequiredResult, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { AgentError, toToolError } from '../../errors.js';
+import { debug } from '../../log.js';
 import type { AuditRecord } from '../../policy/audit.js';
 import { decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
 import type { Resolved } from '../../wacli/resolve.js';
@@ -3945,6 +3982,15 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     client: server.server.getClientVersion()?.name,
   });
 
+  /** Audit failures never change a tool result: a completed send must not be reported as failed. */
+  async function record(rec: AuditRecord): Promise<void> {
+    try {
+      await record(rec);
+    } catch (e) {
+      debug('audit append failed', { tool: rec.tool, outcome: rec.outcome, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
   /** Decides, and when the decision is allow, records the send inside the same serialised section. mark_read is not rate limited. */
   async function gate(ctx: HandlerCtx, tool: WriteTool, recipient: Resolved, extra: { fileInsideRoots?: boolean } = {}): Promise<Decision> {
     return serialised(async () => {
@@ -3957,12 +4003,12 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   }
 
   async function denied(tool: WriteTool, recipient: Resolved, d: Deny, extra: Partial<AuditRecord>): Promise<CallToolResult> {
-    await deps.audit({ ...base(tool, recipient), outcome: 'denied', reason: d.code, ...extra });
+    await record({ ...base(tool, recipient), outcome: 'denied', reason: d.code, ...extra });
     return toToolError(new AgentError(d.code, d.message, d.retryAfterSeconds === undefined ? {} : { retry_after_seconds: d.retryAfterSeconds }));
   }
 
   async function failed(tool: WriteTool, recipient: Resolved | null, e: unknown, extra: Partial<AuditRecord>): Promise<CallToolResult> {
-    await deps.audit({ ...base(tool, recipient), outcome: 'failed', reason: e instanceof AgentError ? e.code : 'error', ...extra });
+    await record({ ...base(tool, recipient), outcome: 'failed', reason: e instanceof AgentError ? e.code : 'error', ...extra });
     return toToolError(e);
   }
 
@@ -3995,7 +4041,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         for (const m of a.mentions ?? []) argv.push(`--mention=${m}`);
         if (a.link_preview === false) argv.push('--no-preview');
         const res = await deps.runner.write<WacliSendResult>(argv);
-        await deps.audit({ ...base('send_text', recipient), outcome: 'sent', message_id: res.id, text: a.message });
+        await record({ ...base('send_text', recipient), outcome: 'sent', message_id: res.id, text: a.message });
         return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
         return failed('send_text', recipient, e, { text: a.message });
@@ -4036,7 +4082,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         if (a.filename) argv.push(`--filename=${a.filename}`);
         const env: Record<string, string> = policy.writes.fileRoots.length > 0 ? { WACLI_MEDIA_ROOTS: policy.writes.fileRoots.join(path.delimiter) } : {};
         const res = await deps.runner.write<WacliSendResult>(argv, { env });
-        await deps.audit({ ...base('send_file', recipient), outcome: 'sent', message_id: res.id, file: a.path, text: a.caption });
+        await record({ ...base('send_file', recipient), outcome: 'sent', message_id: res.id, file: a.path, text: a.caption });
         return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
         return failed('send_file', recipient, e, { file: a.path });
@@ -4068,7 +4114,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const argv = ['send', 'react', `--to=${recipient.jid}`, `--id=${a.message_id}`, `--reaction=${a.reaction}`];
         if (a.sender) argv.push(`--sender=${a.sender}`);
         const res = await deps.runner.write<WacliSendResult>(argv);
-        await deps.audit({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
+        await record({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
         return ok({ sent: true, message_id: res.id, to: recipient });
       } catch (e) {
         return failed('react', recipient, e, { reaction: a.reaction, message_id: a.message_id });
@@ -4092,7 +4138,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const d = await gate(ctx, 'mark_read', recipient);
         if (d.kind === 'deny') return denied('mark_read', recipient, d, {});
         await deps.runner.write<WacliChatStateResult>(['chats', 'mark-read', `--chat=${recipient.jid}`]);
-        await deps.audit({ ...base('mark_read', recipient), outcome: 'sent' });
+        await record({ ...base('mark_read', recipient), outcome: 'sent' });
         return ok({ ok: true, chat: recipient });
       } catch (e) {
         return failed('mark_read', recipient, e, {});
@@ -4113,7 +4159,7 @@ import { registerWriteTools } from './tools/send.js';
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/confirm.test.ts test/integration/write-tools.test.ts && pnpm typecheck`
-Expected: PASS (3 unit, 16 integration). If `server.server.getClientVersion` is reported as missing, replace the `client:` line in `base` with `client: undefined`; it is informational only. If `tools/list` fails with a schema conversion error mentioning `refine`, remove the two `.refine(...)` calls (`send_file.path`, `react.reaction`) and perform the same checks at the top of each handler, returning `toToolError(new AgentError('invalid_input', ...))`.
+Expected: PASS (3 unit, 18 integration). If `server.server.getClientVersion` is reported as missing, replace the `client:` line in `base` with `client: undefined`; it is informational only. If `tools/list` fails with a schema conversion error mentioning `refine`, remove the two `.refine(...)` calls (`send_file.path`, `react.reaction`) and perform the same checks at the top of each handler, returning `toToolError(new AgentError('invalid_input', ...))`.
 
 - [ ] **Step 7: Run the whole suite and commit**
 
