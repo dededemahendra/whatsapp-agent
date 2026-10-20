@@ -2753,16 +2753,15 @@ import { meetsMinimum } from '../version.js';
 import type { Runner } from './runner.js';
 import { phoneFromJid, toIso, type WacliDoctor } from './shape.js';
 
-/** wacli's version is read once per runner (so once per process) and cached. */
-const versionCache = new WeakMap<Runner, Promise<string | null>>();
+/** wacli's version is read once per runner (so once per process) and cached, but only once it was read successfully. */
+const versionCache = new WeakMap<Runner, string>();
 
-export function cachedVersion(runner: Runner): Promise<string | null> {
-  let pending = versionCache.get(runner);
-  if (!pending) {
-    pending = runner.version();
-    versionCache.set(runner, pending);
-  }
-  return pending;
+export async function cachedVersion(runner: Runner): Promise<string | null> {
+  const cached = versionCache.get(runner);
+  if (cached !== undefined) return cached;
+  const version = await runner.version();
+  if (version !== null) versionCache.set(runner, version);
+  return version;
 }
 
 export interface StatusInfo {
@@ -2967,6 +2966,18 @@ describe('whatsapp_status', () => {
     h = await makeHarness({ env: { FAKE_WACLI_VERSION: '0.21.0' } });
     const r = await h.call('whatsapp_status');
     expect(r.structuredContent).toMatchObject({ wacli_version: '0.21.0', min_version_ok: false });
+  });
+
+  it('reads the wacli version once per process but retries while it is unknown', async () => {
+    h = await makeHarness();
+    await h.call('whatsapp_status');
+    await h.call('whatsapp_status');
+    expect((await h.argv()).filter((r) => r.key === 'version')).toHaveLength(1);
+    await h.close();
+    h = await makeHarness({ env: { FAKE_WACLI_VERSION: 'dev' } });
+    await h.call('whatsapp_status');
+    await h.call('whatsapp_status');
+    expect((await h.argv()).filter((r) => r.key === 'version')).toHaveLength(2);
   });
 });
 
@@ -3268,7 +3279,7 @@ export function registerGroupTools(server: McpServer, deps: ServerDeps): void {
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/integration/read-tools.test.ts && pnpm typecheck`
-Expected: PASS (10 tests). If the SDK reports a schema conversion error for `z.int()`, replace it with `z.number().int()` in `schemas.ts`.
+Expected: PASS (11 tests). If the SDK reports a schema conversion error for `z.int()`, replace it with `z.number().int()` in `schemas.ts`.
 
 - [ ] **Step 7: Commit**
 
