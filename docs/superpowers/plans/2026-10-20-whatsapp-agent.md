@@ -975,7 +975,7 @@ describe('fake wacli', () => {
     const { stdout } = await run(FAKE_WACLI, ['--json', '--read-only', 'media', 'download', '--chat=61400000001@s.whatsapp.net', '--id=MSG3', `--output=${tmp}`], { env: fakeEnv() });
     const env = JSON.parse(stdout);
     expect(env.data.path).toBe(path.join(tmp, 'MSG3.png'));
-    expect(env.data.bytes).toBe(68);
+    expect(env.data.bytes).toBe(70);
   });
 });
 ```
@@ -3178,8 +3178,8 @@ describe('download_media', () => {
     expect((await realpath(s.path)).startsWith(mediaDir + path.sep)).toBe(true);
     expect(path.basename(s.path)).toBe('MSG3.png');
     expect(s.mime).toBe('image/png');
-    expect(s.size).toBe(68);
-    expect((await stat(s.path)).size).toBe(68);
+    expect(s.size).toBe(70);
+    expect((await stat(s.path)).size).toBe(70);
     expect((await stat(path.dirname(s.path))).mode & 0o777).toBe(0o700);
     const recs = await h.argv();
     const dl = recs.find((x) => x.key === 'media download')!;
