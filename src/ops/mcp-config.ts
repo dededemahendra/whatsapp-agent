@@ -16,9 +16,10 @@ function shellQuote(s: string): string {
   return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/** `--env` takes a list of values, so the flags go after the server name and end at `--`, as in claude mcp add's own help. */
 export function claudeMcpAddCommand(paths?: Paths, home: string = os.homedir()): string {
   const env = Object.entries(hostEnv(paths, home)).map(([k, v]) => `--env ${k}=${shellQuote(v)}`);
-  return ['claude mcp add --scope user', ...env, 'whatsapp -- npx -y whatsapp-agent mcp'].join(' ');
+  return ['claude mcp add --scope user whatsapp', ...env, '-- npx -y whatsapp-agent mcp'].join(' ');
 }
 
 export function mcpConfigJson(paths?: Paths, home: string = os.homedir()): string {

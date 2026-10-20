@@ -105,9 +105,9 @@ describe('runSetup', () => {
     expect((await loadPolicy(o.paths.policyFile)).writes.enabled).toBe(false);
     expect(calls).toEqual(['install']);
     const text = t.out.join('\n');
-    expect(text).toContain('claude mcp add --scope user');
-    expect(text).toContain('whatsapp -- npx -y whatsapp-agent mcp');
+    expect(text).toContain('claude mcp add --scope user whatsapp --env WHATSAPP_AGENT_CONFIG_DIR=');
     expect(text).toContain('--env WHATSAPP_AGENT_DATA_DIR=');
+    expect(text).toContain('-- npx -y whatsapp-agent mcp');
     expect(text).toContain('whatsapp-agent policy enable');
     expect(text).toContain('WhatsApp');
   });
@@ -505,7 +505,7 @@ describe('runSetup service step', () => {
     const text = t.out.join('\n');
     expect(text).toContain('Could not install the service: launchctl bootstrap failed (5)');
     expect(text).toContain('Install it later with: whatsapp-agent daemon install');
-    expect(text).toContain('claude mcp add --scope user');
+    expect(text).toContain('claude mcp add --scope user whatsapp');
     expect(text).toContain(BAN_NOTICE);
     expect(text).toContain('Write tools are off');
   });

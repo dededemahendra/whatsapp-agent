@@ -80,7 +80,7 @@ describe('mcp config snippets', () => {
   it('include both variables when both dirs differ from the defaults, quoting a value with a space', () => {
     const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: '/etc/wa cfg', WHATSAPP_AGENT_DATA_DIR: '/srv/wa' }, home);
     expect(claudeMcpAddCommand(paths, home)).toBe(
-      "claude mcp add --scope user --env WHATSAPP_AGENT_CONFIG_DIR='/etc/wa cfg' --env WHATSAPP_AGENT_DATA_DIR=/srv/wa whatsapp -- npx -y whatsapp-agent mcp",
+      "claude mcp add --scope user whatsapp --env WHATSAPP_AGENT_CONFIG_DIR='/etc/wa cfg' --env WHATSAPP_AGENT_DATA_DIR=/srv/wa -- npx -y whatsapp-agent mcp",
     );
     expect(JSON.parse(mcpConfigJson(paths, home))).toEqual({
       mcpServers: { whatsapp: { ...plainJson.mcpServers.whatsapp, env: { WHATSAPP_AGENT_CONFIG_DIR: '/etc/wa cfg', WHATSAPP_AGENT_DATA_DIR: '/srv/wa' } } },
@@ -90,7 +90,7 @@ describe('mcp config snippets', () => {
 
   it('include only the variable whose dir differs, and treat XDG-derived dirs as non-default', () => {
     const dataOnly = resolvePaths({ WHATSAPP_AGENT_DATA_DIR: '/srv/wa' }, home);
-    expect(claudeMcpAddCommand(dataOnly, home)).toBe('claude mcp add --scope user --env WHATSAPP_AGENT_DATA_DIR=/srv/wa whatsapp -- npx -y whatsapp-agent mcp');
+    expect(claudeMcpAddCommand(dataOnly, home)).toBe('claude mcp add --scope user whatsapp --env WHATSAPP_AGENT_DATA_DIR=/srv/wa -- npx -y whatsapp-agent mcp');
     const xdg = resolvePaths({ XDG_CONFIG_HOME: '/mnt/cfg' }, home);
     expect(JSON.parse(mcpConfigJson(xdg, home)).mcpServers.whatsapp.env).toEqual({ WHATSAPP_AGENT_CONFIG_DIR: '/mnt/cfg/whatsapp-agent' });
   });
