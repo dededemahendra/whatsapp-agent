@@ -196,7 +196,9 @@ describe('tailFile', () => {
     await writeFile(f, 'a\nb\nc\nd\n');
     expect(await tailFile(f, 2)).toBe('c\nd\n');
     expect(await tailFile(f, 10)).toBe('a\nb\nc\nd\n');
-    expect(await tailFile(path.join(tmp, 'missing'), 3)).toBe('');
+    expect(await tailFile(path.join(tmp, 'missing'), 3)).toBeNull();
+    await writeFile(path.join(tmp, 'empty'), '');
+    expect(await tailFile(path.join(tmp, 'empty'), 3)).toBe('');
   });
   it('followFile shows a log created after following started from its beginning', async () => {
     const f = path.join(tmp, 'later.log');
@@ -217,10 +219,13 @@ describe('tailFile', () => {
     await writeFile(f, 'old line ✓\n');
     const chunks: string[] = [];
     const stop = followFile(f, (c) => chunks.push(c), 20);
-    await new Promise((r) => setTimeout(r, 60));
-    await appendFile(f, 'NEWLINE-ONE\n');
-    await new Promise((r) => setTimeout(r, 80));
-    stop();
+    try {
+      await stop.ready;
+      await appendFile(f, 'NEWLINE-ONE\n');
+      await waitFor(() => chunks.length > 0, { what: 'the appended line to be printed' });
+    } finally {
+      stop();
+    }
     expect(chunks.join('')).toBe('NEWLINE-ONE\n');
   });
 });

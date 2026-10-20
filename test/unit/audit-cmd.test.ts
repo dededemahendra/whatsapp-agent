@@ -39,6 +39,25 @@ describe('audit option parsing', () => {
     expect(parseSince('2026-10-20').toISOString()).toBe('2026-10-20T00:00:00.000Z');
     for (const bad of ['garbage', '7d']) expect(() => parseSince(bad)).toThrowError(expect.objectContaining({ code: 'invalid_input' }));
   });
+
+  it('accepts YYYY-MM-DD or a full ISO 8601 timestamp, and nothing else', () => {
+    expect(parseSince('2026-10-20T10:30:00Z').toISOString()).toBe('2026-10-20T10:30:00.000Z');
+    expect(parseSince('2026-10-20T10:30Z').toISOString()).toBe('2026-10-20T10:30:00.000Z');
+    expect(parseSince('2026-10-20T10:30:00.123+10:00').toISOString()).toBe('2026-10-20T00:30:00.123Z');
+    expect(parseSince('2026-10-20T10:30:00-05:30').toISOString()).toBe('2026-10-20T16:00:00.000Z');
+    expect(parseSince('2024-02-29').toISOString()).toBe('2024-02-29T00:00:00.000Z');
+    const bad = [
+      '2026', '2026-10', '20261020', '10/20/2026', 'Oct 20 2026', 'October 20, 2026', '2026-10-20 10:30:00', '2026-10-20T10:30:00', '2026-10-20T10:30',
+      '2026-10-20T10', '2026-10-20T', 'T10:30:00Z', '2026-1-5', '2026-10-20Z', '1700000000', '', ' 2026-10-20', '2026-10-20 ', '+2026-10-20',
+      '2026-02-31', '2025-02-29', '2026-04-31', '2026-13-01', '2026-00-10', '2026-10-00', '2026-10-20T25:00:00Z', '2026-10-20T10:60:00Z', '2026-02-31T10:00:00Z',
+    ];
+    for (const raw of bad) {
+      expect(() => parseSince(raw), JSON.stringify(raw)).toThrowError(expect.objectContaining({
+        code: 'invalid_input',
+        message: expect.stringMatching(/YYYY-MM-DD.*ISO 8601 timestamp/),
+      }));
+    }
+  });
 });
 
 describe('mcp config snippets', () => {

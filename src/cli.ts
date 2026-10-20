@@ -7,7 +7,7 @@ import { policyCommand } from './ops/policy-cmd.js';
 import { setupCommand } from './ops/setup-cmd.js';
 import { PKG_VERSION } from './version.js';
 
-export const program = new Command()
+const program = new Command()
   .name('whatsapp-agent')
   .description('MCP server and CLI that lets AI agents read, search and send WhatsApp through wacli, with writes off by default')
   .version(PKG_VERSION);

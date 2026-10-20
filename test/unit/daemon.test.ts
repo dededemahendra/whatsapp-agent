@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildSyncArgs, describeStderrLine, parseEventLine, startSupervisor } from '../../src/ops/daemon.js';
 import { DEFAULT_POLICY } from '../../src/policy/schema.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, removeTmp } from '../helpers/fake.js';
-import { waitFor } from '../helpers/wait.js';
+import { waitFor, within } from '../helpers/wait.js';
 
 let tmp: string;
 beforeEach(async () => { tmp = await makeTmp(); });
@@ -56,8 +56,7 @@ describe('startSupervisor', () => {
   it('logged_out stops a child that lingers: SIGTERM first, so no SIGKILL is needed', async () => {
     const { handle, lines } = start('connected;logged_out;sleep:30000');
     try {
-      const outcome = await Promise.race([handle.done, new Promise<string>((resolve) => setTimeout(() => resolve('still running'), 4000))]);
-      expect(outcome).toBe('logged_out');
+      expect(await within(handle.done, 4000, 'the supervisor to finish after logged_out')).toBe('logged_out');
       expect(lines.some((l) => l.includes('event=disconnected'))).toBe(true);
       expect(lines.some((l) => l.includes('SIGKILL'))).toBe(false);
     } finally {
@@ -69,8 +68,7 @@ describe('startSupervisor', () => {
     const { handle, lines } = start('ignore-term;connected;logged_out;sleep:30000', { loggedOutGraceMs: 300 });
     const startedAt = Date.now();
     try {
-      const outcome = await Promise.race([handle.done, new Promise<string>((resolve) => setTimeout(() => resolve('still running'), 6000))]);
-      expect(outcome).toBe('logged_out');
+      expect(await within(handle.done, 6000, 'the supervisor to kill a child that ignores SIGTERM')).toBe('logged_out');
       expect(Date.now() - startedAt).toBeGreaterThanOrEqual(250);
       expect(lines.some((l) => l.includes('SIGKILL'))).toBe(true);
       expect(lines.some((l) => l.includes('event=disconnected'))).toBe(false);
@@ -81,7 +79,7 @@ describe('startSupervisor', () => {
 
   it('crash restarts with backoff, doubling to the cap, then stop() ends it', async () => {
     const { handle, sleeps, lines } = start('connected;crash|crash|crash|crash|connected;sleep:30000');
-    await new Promise((r) => setTimeout(r, 3000));
+    await waitFor(() => sleeps.length >= 4, { what: 'four backoff sleeps' });
     expect(sleeps).toEqual([50, 100, 200, 200]);
     await handle.stop();
     await expect(handle.done).resolves.toBe('stopped');
@@ -89,8 +87,8 @@ describe('startSupervisor', () => {
   });
 
   it('stop() interrupts a backoff sleep', async () => {
-    const { handle } = start('crash', { sleep: () => new Promise(() => {}) });
-    await new Promise((r) => setTimeout(r, 400));
+    const { handle, lines } = start('crash', { sleep: () => new Promise(() => {}) });
+    await waitFor(() => lines.some((l) => l.includes('restarting in')), { what: 'the supervisor to start its backoff sleep' });
     await handle.stop();
     await expect(handle.done).resolves.toBe('stopped');
   });
@@ -105,7 +103,7 @@ describe('startSupervisor', () => {
 
   it('forwards non-JSON stderr lines to the log', async () => {
     const { handle, lines } = start('text;sleep:30000');
-    await new Promise((r) => setTimeout(r, 400));
+    await waitFor(() => lines.some((l) => l.endsWith('connected; history sync 12%')), { what: 'the plain line in the log' });
     await handle.stop();
     await handle.done;
     expect(lines.some((l) => l.endsWith('connected; history sync 12%'))).toBe(true);

@@ -134,3 +134,36 @@ describe('formatAge', () => {
     expect([0, 1, 59, 60, 119, 3599, 3600, 7200, 86399, 86400, 259200].map(formatAge)).toEqual(['0s', '1s', '59s', '1m', '1m', '59m', '1h', '2h', '23h', '1d', '3d']);
   });
 });
+
+describe('daemon logs', () => {
+  const idle: DaemonCommandDeps = { service: stubService({ installed: false, running: null, detail: 'not installed' }).service };
+  const logFile = () => path.join(tmp, 'data', 'daemon.log');
+
+  it('says there is no log yet, with the path, and exits 0', async () => {
+    const r = await run(['logs'], idle);
+    expect(r.out).toBe(`No log yet at ${logFile()}.\n`);
+    expect(r.exitCode).toBeUndefined();
+  });
+
+  it('prints the last 100 lines by default and the last n with -n', async () => {
+    await mkdir(path.join(tmp, 'data'), { recursive: true });
+    await writeFile(logFile(), Array.from({ length: 150 }, (_, i) => `line ${i + 1}`).join('\n') + '\n');
+    const all = await run(['logs'], idle);
+    expect(all.out.split('\n').filter(Boolean)).toHaveLength(100);
+    expect(all.out.startsWith('line 51\n')).toBe(true);
+    expect((await run(['logs', '-n', '2'], idle)).out).toBe('line 149\nline 150\n');
+    expect((await run(['logs', '--lines', '1'], idle)).out).toBe('line 150\n');
+  });
+
+  it('prints nothing for an empty log rather than saying it is missing', async () => {
+    await mkdir(path.join(tmp, 'data'), { recursive: true });
+    await writeFile(logFile(), '');
+    expect((await run(['logs'], idle)).out).toBe('');
+  });
+
+  it('refuses -n unless it is a positive whole number, like audit -n', async () => {
+    for (const bad of ['0', '-3', 'abc', '1.5', '', '1e3', ' 5']) {
+      await expect(run(['logs', '-n', bad], idle)).rejects.toMatchObject({ code: 'invalid_input', message: '--lines must be a positive whole number' });
+    }
+  });
+});

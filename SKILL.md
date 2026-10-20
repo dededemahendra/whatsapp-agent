@@ -25,6 +25,7 @@ Write tools (`send_text`, `send_file`, `react`, `mark_read`) follow the person's
 - `confirmation_unavailable` means this host cannot show forms. Tell the person how to allowlist the recipient; do not work around it.
 - Sends are rate limited. `rate_limited` includes `retry_after_seconds`; wait that long or stop.
 - Never send bulk, unsolicited or marketing messages. Never send the same text to many people.
+- WhatsApp's terms prohibit unofficial clients, and accounts have been warned or banned even at low volume. The rate limit lowers that risk but does not remove it, so keep sends few and expected.
 - After a `timeout` on a send, read the chat before retrying: the message may have gone through.
 - Never run `whatsapp-agent policy` commands, edit `policy.json`, `rate-limit.json` or `audit.jsonl`, or call `wacli` directly. Those are the person's controls. If a send is refused, tell them and let them decide.
 

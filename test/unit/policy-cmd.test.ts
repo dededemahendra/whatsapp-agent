@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath } from 'node:fs/promises';
+import { mkdir, readFile, realpath, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentError } from '../../src/errors.js';
@@ -55,6 +55,20 @@ describe('policy edits', () => {
     const p = await addFileRoot(file, '~/outbox');
     expect(p.writes.fileRoots).toEqual([await realpath(dir)]);
     await expect(addFileRoot(file, path.join(tmp, 'missing'))).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  it('refuses the filesystem root and the home directory itself, but not a folder inside it', async () => {
+    const sub = path.join(tmp, 'outbox');
+    await mkdir(sub);
+    vi.stubEnv('HOME', tmp);
+    const message = 'Choose a directory inside your home, not the whole home directory.';
+    for (const dir of ['/', '~', '~/', tmp, `${tmp}/`, path.join(tmp, '.'), path.join(sub, '..')]) {
+      await expect(addFileRoot(file, dir), dir).rejects.toMatchObject({ code: 'invalid_input', message });
+    }
+    const link = path.join(tmp, 'home-link');
+    await symlink(tmp, link);
+    await expect(addFileRoot(file, link)).rejects.toMatchObject({ code: 'invalid_input', message });
+    expect((await addFileRoot(file, '~/outbox')).writes.fileRoots).toEqual([await realpath(sub)]);
   });
 
   it('formats a readable summary and flags inert allowlist entries', async () => {

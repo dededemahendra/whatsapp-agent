@@ -3,10 +3,11 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { doctorCommand } from '../../src/ops/doctor-cmd.js';
 import { collectDoctor, formatDoctor } from '../../src/ops/doctor.js';
+import { claudeMcpAddCommand } from '../../src/ops/mcp-config.js';
 import { resolvePaths } from '../../src/paths.js';
 import { DEFAULT_POLICY } from '../../src/policy/schema.js';
 import { createRunner } from '../../src/wacli/runner.js';
-import { FAKE_WACLI, FIXTURES, fakeEnv, makeTmp, removeTmp } from '../helpers/fake.js';
+import { FAKE_WACLI, FIXTURES, fakeEnv, fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
 
 let tmp: string;
 beforeEach(async () => { tmp = await makeTmp(); });
@@ -20,13 +21,57 @@ describe('doctor', () => {
     const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service, now: () => new Date('2026-10-20T10:00:00Z') });
     expect(r.status.authenticated).toBe(true);
     expect(r.service).toEqual({ installed: false, running: null, detail: 'not installed' });
-    expect(r.problems).toEqual(['The sync daemon is not installed. Reads will go stale. Run: whatsapp-agent daemon install']);
+    expect(r.problems).toEqual([]);
+    expect(r.warnings).toEqual(['The sync daemon is not installed. Reads will go stale. Run: whatsapp-agent daemon install']);
     const text = formatDoctor(r);
     expect(text).toContain('wacli: 0.22.0');
     expect(text).toContain('paired: yes (+61400000000)');
     expect(text).toContain('writes: disabled');
     expect(text).toContain('last activity: none');
     expect(text).not.toMatch(/heartbeat/i);
+    expect(text).toContain('connection: in use by the daemon (expected)');
+    expect(text).toContain(`data dir: ${paths.dataDir}`);
+    expect(text).toContain(`host command: ${claudeMcpAddCommand(paths)}`);
+    expect(text).toContain('No problems found.');
+    expect(text).toContain('Warnings:\n  - The sync daemon is not installed.');
+    expect(r.host_command).toBe(claudeMcpAddCommand(paths));
+  });
+
+  it('labels only the store lock as the daemon, and shows other connection states as they are', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const dir = await fixturesWith({ 'doctor.json': '{"success":true,"data":{"store_dir":"__STORE_DIR__","lock_held":false,"authenticated":true,"session_revoked":false,"connected":true,"connection_state":"connected","fts_enabled":true},"error":null}\n' });
+    try {
+      const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_FIXTURES: dir, FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+      const text = formatDoctor(await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date() }));
+      expect(text).toContain('connection: connected');
+      expect(text).not.toContain('in use by the daemon');
+    } finally {
+      await removeTmp(dir);
+    }
+  });
+
+  it('keeps the exit code at 0 when only the daemon is missing, and at 1 for a problem', async () => {
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const before = process.exitCode;
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    vi.stubEnv('WHATSAPP_AGENT_CONFIG_DIR', paths.configDir);
+    vi.stubEnv('WHATSAPP_AGENT_DATA_DIR', paths.dataDir);
+    vi.stubEnv('WHATSAPP_AGENT_WACLI_BIN', FAKE_WACLI);
+    vi.stubEnv('FAKE_WACLI_FIXTURES', FIXTURES);
+    vi.stubEnv('FAKE_WACLI_STORE_DIR', path.join(tmp, 'store'));
+    const stopped = { install: async () => '', uninstall: async () => {}, status: async () => ({ installed: true, running: false, detail: 'installed, inactive' }) };
+    try {
+      process.exitCode = undefined;
+      await doctorCommand({ service: () => stopped }).parseAsync([], { from: 'user' });
+      expect(process.exitCode).toBeUndefined();
+      expect(out.mock.calls.map((c) => String(c[0])).join('')).toContain('Warnings:\n  - The sync daemon is installed but not running. Restart it with: whatsapp-agent daemon install');
+      vi.stubEnv('FAKE_WACLI_FAIL', 'doctor|1|not authenticated; run `wacli auth`');
+      await doctorCommand({ service: () => stopped }).parseAsync([], { from: 'user' });
+      expect(process.exitCode).toBe(1);
+    } finally {
+      out.mockRestore();
+      process.exitCode = before;
+    }
   });
 
   it('labels the heartbeat file last activity and shows its age', async () => {
@@ -136,6 +181,7 @@ describe('doctor with a service that is installed but stopped', () => {
     const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
     const service = { install: async () => '', uninstall: async () => {}, status: async () => ({ installed: true, running: false, detail: 'installed, inactive' }) };
     const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service, now: () => new Date() });
-    expect(r.problems).toEqual(['The sync daemon is installed but not running. Restart it with: whatsapp-agent daemon install']);
+    expect(r.problems).toEqual([]);
+    expect(r.warnings).toEqual(['The sync daemon is installed but not running. Restart it with: whatsapp-agent daemon install']);
   });
 });

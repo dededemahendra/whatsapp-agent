@@ -1,11 +1,12 @@
 import { readFile, stat } from 'node:fs/promises';
 
-export async function tailFile(file: string, lines: number): Promise<string> {
+/** The last `lines` lines of a file, or null when the file does not exist yet (other read errors give an empty string). */
+export async function tailFile(file: string, lines: number): Promise<string | null> {
   let text: string;
   try {
     text = await readFile(file, 'utf8');
-  } catch {
-    return '';
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? null : '';
   }
   const all = text.split('\n');
   if (all[all.length - 1] === '') all.pop();

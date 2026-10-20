@@ -700,6 +700,11 @@ overrides the earlier text where they differ.
   case-insensitive, trimmed, NFC-normalised match on a chat name or a contact's
   name, alias or system name, and a lone partial match is `ambiguous_recipient`
   with that candidate. Read tools keep the lone-partial rule of A15.
+- A24. Every write is preceded by an `attempted` audit row, appended before the
+  wacli call and followed by `sent` or `failed`; if that row cannot be appended
+  the send does not happen.
 - A25. The daemon logs the sanitised message of an `error` event and of a wacli
   failure envelope (controls stripped, JIDs and runs of 8 or more digits
   replaced, 200 characters at most); other recognised events stay name-only.
+- A26. `daemon.staleThreshold` is at most 2 minutes (seconds up to 120, or `1m`
+  or `2m`), and the validation message names the limit.

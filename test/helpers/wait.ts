@@ -10,3 +10,14 @@ export async function waitFor(
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 }
+
+/** Resolves with `promise`, or fails with `what` once `ms` have passed. The timer is cleared either way, so nothing is left pending. */
+export async function within<T>(promise: Promise<T>, ms: number, what = 'the operation'): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Timed out after ${ms} ms waiting for ${what}`)), ms); });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

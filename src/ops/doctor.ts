@@ -4,6 +4,7 @@ import { summarizePolicy, type PolicySummary } from '../policy/summary.js';
 import type { Runner } from '../wacli/runner.js';
 import { getStatus, type StatusInfo } from '../wacli/status.js';
 import { MIN_WACLI_VERSION } from '../version.js';
+import { claudeMcpAddCommand } from './mcp-config.js';
 import { isInertEntry } from './policy-cmd.js';
 import type { ServiceManager, ServiceStatus } from './service-types.js';
 
@@ -14,11 +15,17 @@ export interface DoctorReport {
   policy: PolicySummary | null;
   service: ServiceStatus | null;
   paths: { config_dir: string; data_dir: string; policy_file: string; audit_file: string; daemon_log: string };
+  /** The command that connects Claude Code to this setup. */
+  host_command: string;
+  /** What blocks normal use: wacli missing or old, not paired, a corrupt policy. Any entry makes doctor exit 1. */
   problems: string[];
+  /** Worth fixing but not blocking, such as a daemon that is missing or stopped. */
+  warnings: string[];
 }
 
 export async function collectDoctor(opts: { runner: Runner; policyFile: string; paths: Paths; service: ServiceManager | null; now: () => Date }): Promise<DoctorReport> {
   const problems: string[] = [];
+  const warnings: string[] = [];
   let status: StatusInfo;
   try {
     status = await getStatus(opts.runner, opts.now());
@@ -54,9 +61,9 @@ export async function collectDoctor(opts: { runner: Runner; policyFile: string; 
   }
   const service = opts.service ? await opts.service.status() : null;
   if (service && !service.installed) {
-    problems.push('The sync daemon is not installed. Reads will go stale. Run: whatsapp-agent daemon install');
+    warnings.push('The sync daemon is not installed. Reads will go stale. Run: whatsapp-agent daemon install');
   } else if (service && service.running === false) {
-    problems.push('The sync daemon is installed but not running. Restart it with: whatsapp-agent daemon install');
+    warnings.push('The sync daemon is installed but not running. Restart it with: whatsapp-agent daemon install');
   }
   return {
     status,
@@ -67,7 +74,9 @@ export async function collectDoctor(opts: { runner: Runner; policyFile: string; 
       config_dir: opts.paths.configDir, data_dir: opts.paths.dataDir, policy_file: opts.paths.policyFile,
       audit_file: opts.paths.auditFile, daemon_log: opts.paths.daemonLog,
     },
+    host_command: claudeMcpAddCommand(opts.paths),
     problems,
+    warnings,
   };
 }
 
@@ -76,7 +85,7 @@ export function formatDoctor(r: DoctorReport): string {
   const lines = [
     `wacli: ${s.wacli_version ?? 'not found'} (${r.wacli_bin})${s.wacli_version && !s.min_version_ok ? ' below minimum' : ''}`,
     `paired: ${s.authenticated ? `yes${s.phone ? ` (${s.phone})` : ''}` : 'no'}`,
-    `connection: ${s.connection_state ?? 'unknown'}`,
+    `connection: ${s.connection_state === 'locked_by_other_process' ? 'in use by the daemon (expected)' : (s.connection_state ?? 'unknown')}`,
     `last sync: ${s.last_sync_at ?? 'unknown'}`,
     `last activity: ${s.heartbeat_at ? `${s.heartbeat_at} (${s.heartbeat_age_seconds}s ago)` : 'none'}`,
     `daemon service: ${r.service ? r.service.detail : 'not supported on this platform'}`,
@@ -85,14 +94,20 @@ export function formatDoctor(r: DoctorReport): string {
       ? `writes: ${r.policy.writes_enabled ? 'enabled' : 'disabled'}, confirm: ${r.policy.confirm}, allowlist: ${r.policy.allow_count}, groups: ${r.policy.groups_enabled ? 'on' : 'off'}, file roots: ${r.policy.file_roots_count}`
       : 'writes: unknown (the policy file could not be loaded)',
     `config: ${r.paths.policy_file}`,
+    `data dir: ${r.paths.data_dir}`,
     `audit: ${r.paths.audit_file}`,
     `daemon log: ${r.paths.daemon_log}`,
+    `host command: ${r.host_command}`,
   ];
   if (r.problems.length > 0) {
     lines.push('', 'Problems:');
     for (const p of r.problems) lines.push(`  - ${p}`);
   } else {
     lines.push('', 'No problems found.');
+  }
+  if (r.warnings.length > 0) {
+    lines.push('', 'Warnings:');
+    for (const w of r.warnings) lines.push(`  - ${w}`);
   }
   return lines.join('\n') + '\n';
 }

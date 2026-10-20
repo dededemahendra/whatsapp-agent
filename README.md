@@ -10,10 +10,16 @@ wacli and this tool use the WhatsApp Web protocol through an unofficial client. 
 
 ## Install
 
-1. Install wacli (macOS or Linux):
+1. Install wacli (macOS or Linux). With Homebrew:
 
    ```
    brew install openclaw/tap/wacli
+   ```
+
+   Or with Go:
+
+   ```
+   CGO_ENABLED=1 CGO_CFLAGS="-Wno-error=missing-braces" go install -tags sqlite_fts5 github.com/openclaw/wacli/cmd/wacli@latest
    ```
 
 2. Install whatsapp-agent globally and run setup:
@@ -38,6 +44,8 @@ wacli and this tool use the WhatsApp Web protocol through an unofficial client. 
    ```json
    { "mcpServers": { "whatsapp": { "command": "npx", "args": ["-y", "whatsapp-agent", "mcp"] } } }
    ```
+
+   Other hosts keep their MCP configuration in their own settings file. See the host's documentation for where it is, and add the same command and arguments there.
 
 Requires Node 22.12 or newer and wacli 0.22.0 or newer.
 
@@ -122,9 +130,11 @@ whatsapp-agent daemon uninstall
 
 `daemon install` needs a global install. On other platforms run `whatsapp-agent daemon run` under your own supervisor.
 
+On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
+
 ## Troubleshooting
 
-Run `whatsapp-agent doctor`. It prints wacli's version, pairing state, the daemon, the policy and the paths, and lists anything that needs attention with the command to fix it. Use `whatsapp-agent doctor --json` for the same report as JSON.
+Run `whatsapp-agent doctor`. It prints wacli's version, pairing state, the daemon, the policy and the paths, and lists anything that needs attention with the command to fix it. Problems (wacli missing or too old, not paired, a corrupt policy) make it exit 1. Warnings, such as a missing daemon, are listed but do not change the exit code. Use `whatsapp-agent doctor --json` for the same report as JSON.
 
 Common cases:
 

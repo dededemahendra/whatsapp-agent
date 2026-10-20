@@ -4,6 +4,7 @@ import { ensureDirs, resolvePaths, type Paths } from '../paths.js';
 import { loadPolicy } from '../policy/schema.js';
 import { createRunner, type Runner } from '../wacli/runner.js';
 import { getStatus } from '../wacli/status.js';
+import { parsePositiveInt } from './args.js';
 import { startSupervisor } from './daemon.js';
 import { isGlobalInstall, serviceManagerForThisMachine, servicePathsForThisMachine } from './service.js';
 import type { ServiceManager } from './service-types.js';
@@ -40,6 +41,7 @@ export function daemonCommand(deps: DaemonCommandDeps = {}): Command {
       return null;
     }
   }
+
   const cmd = new Command('daemon').description('Keep the WhatsApp mirror in sync in the background');
 
   cmd.command('run').description('Run the sync supervisor in the foreground (service installers call this)').action(async () => {
@@ -90,9 +92,11 @@ export function daemonCommand(deps: DaemonCommandDeps = {}): Command {
     if (!manager || !s.running) process.exitCode = 1;
   });
 
-  cmd.command('logs').description('Show the daemon log').option('-n, --lines <n>', 'lines to show', '100').option('-f, --follow', 'keep printing new lines').action(async (opts: { lines: string; follow?: boolean }) => {
+  cmd.command('logs').description('Show the daemon log').option('-n, --lines <n>', 'lines to show (a positive whole number)', '100').option('-f, --follow', 'keep printing new lines').action(async (opts: { lines: string; follow?: boolean }) => {
+    const lines = parsePositiveInt(opts.lines, '--lines');
     const paths = resolvePaths();
-    process.stdout.write(await tailFile(paths.daemonLog, Number(opts.lines) || 100));
+    const text = await tailFile(paths.daemonLog, lines);
+    process.stdout.write(text ?? `No log yet at ${paths.daemonLog}.\n`);
     if (opts.follow) {
       const stop = followFile(paths.daemonLog, (chunk) => process.stdout.write(chunk));
       await new Promise<void>((resolve) => { process.on('SIGINT', () => { stop(); resolve(); }); });

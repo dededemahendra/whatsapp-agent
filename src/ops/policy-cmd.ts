@@ -84,6 +84,11 @@ export async function addFileRoot(file: string, dir: string): Promise<Policy> {
   } catch {
     throw new AgentError('invalid_input', `${abs} is not an existing directory`);
   }
+  const home = os.homedir();
+  const realHome = await realpath(home).catch(() => path.resolve(home));
+  if (real === path.parse(real).root || real === realHome) {
+    throw new AgentError('invalid_input', 'Choose a directory inside your home, not the whole home directory.');
+  }
   return edit(file, (p) => (p.writes.fileRoots.includes(real) ? p : { ...p, writes: { ...p.writes, fileRoots: [...p.writes.fileRoots, real] } }));
 }
 
