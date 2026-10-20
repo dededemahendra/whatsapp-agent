@@ -238,6 +238,27 @@ describe('a confirmation can be accepted once', () => {
     expect(await sends()).toHaveLength(2);
   });
 
+  it('leaves no replay window at the end of the state lifetime, where the SDK still verifies a state for part of a second', async () => {
+    h = await makeHarness({ policy: enabled(), manualRounds: true });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const second = Math.ceil(Date.now() / 1000) * 1000; // a whole second, so the state's expiry is exactly 300 seconds on
+    vi.setSystemTime(second);
+    const first = await h.callRound('send_text', args);
+    vi.setSystemTime(second + 1);
+    expect((await h.callRound('send_text', args, { inputResponses: accept, requestState: first.requestState })).isError).toBeFalsy();
+    expect(await sends()).toHaveLength(1);
+
+    // 300.9 seconds after the mint, 299.9 after the answer: the SDK still accepts the state, so the nonce must still be refused.
+    vi.setSystemTime(second + 300_900);
+    const replay = await h.callRound('send_text', args, { inputResponses: accept, requestState: first.requestState });
+    expect(replay.resultType).toBe('input_required');
+    expect(await sends()).toHaveLength(1);
+
+    vi.setSystemTime(second + 301_000);
+    await expectProtocolRefusal(h.callRound('send_text', args, { inputResponses: accept, requestState: first.requestState }));
+    expect(await sends()).toHaveLength(1);
+  });
+
   it('gives two prompts for the same text and recipient two different states', async () => {
     h = await makeHarness({ policy: enabled(), manualRounds: true });
     const a = await h.callRound('send_text', args);

@@ -240,7 +240,7 @@ describe('readAnswer', () => {
       expect(readAnswer(ctx(accept, bare), expected)).toBe('none');
     });
 
-    it('forgets a nonce when its five minutes are up, and prunes whenever an answer is read', () => {
+    it('remembers a nonce for the state lifetime plus two seconds, then forgets it, pruning whenever an answer is read', () => {
       const now = Date.now();
       vi.useFakeTimers({ toFake: ['Date'] });
       try {
@@ -254,7 +254,12 @@ describe('readAnswer', () => {
         vi.setSystemTime(now + 299_000);
         expect(readAnswer(ctx(accept, first), expected)).toBe('none');
 
+        // The SDK counts a state's age in whole seconds, so it can still verify a state a second past its 300: the nonce has to outlast that.
         vi.setSystemTime(now + 301_000);
+        expect(readAnswer(ctx(accept, first), expected)).toBe('none');
+        expect(consumedNonceCount()).toBeGreaterThanOrEqual(2);
+
+        vi.setSystemTime(now + 303_000);
         expect(readAnswer(ctx(undefined, undefined), expected)).toBe('none');
         expect(consumedNonceCount()).toBe(0);
         expect(readAnswer(ctx(accept, first), expected)).toBe('accepted'); // long past what the SDK would still have verified

@@ -141,8 +141,14 @@ export function reactPrompt(to: Resolved, r: ReactSend): string {
   return `${head} to message ${sanitiseName(r.messageId)} in ${describeTarget(to)}?${r.sender ? `\n\n${line('Original sender', sanitiseName(r.sender))}` : ''}`;
 }
 
-/** How long a prompt's state stays good, in seconds. The nonce of an accepted state is remembered for as long. */
+/** How long a prompt's state stays good, in seconds. */
 const STATE_TTL_SECONDS = 300;
+
+/**
+ * How long the nonce of an accepted state is remembered. The SDK counts a state's age in whole seconds, from the second it was minted in, so
+ * it can still verify a state for up to a second past the lifetime. Two seconds more means a nonce is never forgotten while its state verifies.
+ */
+const NONCE_KEEP_SECONDS = STATE_TTL_SECONDS + 2;
 
 let codec: RequestStateCodec<ConfirmState> | undefined;
 
@@ -156,8 +162,8 @@ export function confirmCodec(): RequestStateCodec<ConfirmState> {
 }
 
 /**
- * Nonces of states that have been accepted, each with the time (ms) after which it can be forgotten. A state is only good for five minutes
- * and the nonce is kept for five minutes from its acceptance, so by the time it is forgotten the SDK refuses the state anyway.
+ * Nonces of states that have been accepted, each with the time (ms) after which it can be forgotten. A nonce is kept for NONCE_KEEP_SECONDS
+ * from its acceptance, which is later than the state can still verify, so by the time it is forgotten the SDK refuses the state anyway.
  */
 const consumed = new Map<string, number>();
 
@@ -188,7 +194,7 @@ export function readAnswer(ctx: HandlerCtx, expected: ConfirmBinding): Answer {
   if (!sameBinding(state, expected)) return 'none';
   const nonce = state.nonce;
   if (typeof nonce !== 'string' || nonce === '' || consumed.has(nonce)) return 'none';
-  consumed.set(nonce, now + STATE_TTL_SECONDS * 1000);
+  consumed.set(nonce, now + NONCE_KEEP_SECONDS * 1000);
   return 'accepted';
 }
 
