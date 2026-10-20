@@ -606,3 +606,52 @@ Package manager: pnpm. Node engines `>=20`.
 - Group administration, message edit and delete, polls, voice notes.
 - Multi-account policy in one file.
 - Windows service installation.
+
+## 16. Amendments made during planning (2026-10-20)
+
+Facts learnt from the wacli and MCP SDK sources while writing the plan. Each
+overrides the earlier text where they differ.
+
+- A1. Node engines are `>=22` and CI runs Node 22, 24 and 26. Node 20 reached
+  end of life in April 2026.
+- A2. No bundler. `tsc` emits ESM to `dist/`; `bin/whatsapp-agent.mjs` is a
+  shim that imports `dist/cli.js`. `tsdown` is dropped.
+- A3. `wacli version` prints plain text (for example `0.22.0`) and has no
+  `--json`. The version is parsed with a `\d+\.\d+\.\d+` match.
+- A4. wacli writes its JSON error envelope `{"success":false,"data":null,"error":"..."}`
+  to **stderr** and exits 1. Success envelopes `{"success":true,"data":...}`
+  go to stdout. The runner parses both streams accordingly.
+- A5. `groups info` requires a live connection and the store lock, so it
+  cannot run beside the daemon. `get_group` instead uses the local snapshot:
+  `groups list --query=<jid>` (matches name or JID) for owner, created time
+  and community links, plus `groups participants list --jid=<jid>`.
+  Description, announce-only and locked flags are not available locally and
+  are dropped from `get_group`. The daemon passes `--refresh-groups` and
+  `--refresh-contacts` so the snapshot is refreshed on every start.
+- A6. wacli chat kinds are `dm`, `group`, `newsletter`, `broadcast` and
+  `unknown`; the agent-facing kinds are `user`, `group`, `channel`,
+  `broadcast`, `unknown`.
+- A7. Message rows from wacli use Go field names without JSON tags:
+  `ChatJID`, `MsgID`, `SenderJID`, `SenderName`, `Timestamp`, `FromMe`,
+  `Text`, `DisplayText`, `quoted_msg_id`, `quoted_sender_jid`, `MediaType`,
+  `MediaCaption`, `Filename`, `MimeType`, `Edited`, `Revoked`. There is no
+  file size on a message row, so the agent-facing media object is
+  `{type, caption, filename, mime}` without `size`.
+- A8. Contact rows carry `jid`, `phone`, `name`, `alias`, `system_name`. The
+  agent-facing contact is `{jid, phone, name, alias, system_name}`; there is
+  no `push_name`.
+- A9. `download_media` passes a per-chat directory we own as `--output`;
+  wacli chooses the file name inside it. The path returned is still inside
+  the data directory.
+- A10. The policy is re-read from disk on every write tool call and on
+  `whatsapp_status`, so `policy enable` takes effect without restarting the
+  MCP server. Input schema limits are fixed at server start.
+- A11. Two error codes are added: `store_locked` (wacli reported the store
+  lock held by another process) and `invalid_input`.
+- A12. Model-sourced values are passed to wacli as `--flag=value`, and
+  positional queries are preceded by `--`, so text beginning with `-` is
+  never parsed as a flag.
+- A13. CI runs typecheck, tests and build; there is no separate linter in
+  v1.
+- A14. The daemon service installer accepts `WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE=1`
+  to allow installing from a repository checkout during development.
