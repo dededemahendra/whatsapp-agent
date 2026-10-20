@@ -1,4 +1,4 @@
-import { stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type { CallToolResult, InputRequiredResult, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
@@ -8,7 +8,10 @@ import type { AuditRecord } from '../../policy/audit.js';
 import { decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
 import type { Resolved } from '../../wacli/resolve.js';
 import type { WacliChatStateResult, WacliSendResult } from '../../wacli/shape.js';
-import { clientCanConfirm, confirmationRequired, readAnswer, type HandlerCtx } from '../confirm.js';
+import {
+  clientCanConfirm, confirmationRequired, filePrompt, fileState, reactPrompt, reactState, readAnswer, textPrompt, textState,
+  type ConfirmState, type FileSend, type HandlerCtx, type ReactSend, type TextSend,
+} from '../confirm.js';
 import type { ServerDeps } from '../deps.js';
 import { ok } from '../result.js';
 import { messageIdInput, recipientInput, ResolvedSchema, SendResultSchema } from '../schemas.js';
@@ -56,9 +59,19 @@ export function drainInFlight(timeoutMs: number): Promise<void> {
   });
 }
 
+/** What a file send will read: where the file really is, how big it is and when it last changed. Null when it cannot be found. */
+async function fileFacts(file: string): Promise<Pick<FileSend, 'realPath' | 'size' | 'mtimeMs'> | null> {
+  try {
+    const real = await realpath(file);
+    const s = await stat(real);
+    return { realPath: real, size: s.size, mtimeMs: s.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
 export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   const { limits } = deps.startupPolicy;
-  const label = (r: Resolved) => (r.name ? `${r.name} (${r.jid})` : r.jid);
   const base = (tool: WriteTool, r: Resolved | null): AuditRecord => ({
     ts: deps.now().toISOString(), tool, to_jid: r?.jid ?? null, to_name: r?.name ?? null, kind: r?.kind ?? null, outcome: 'sent',
     client: server.server.getClientVersion()?.name,
@@ -73,12 +86,16 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     }
   }
 
-  /** Decides, and when the decision is allow, records the send inside the same serialised section. mark_read is not rate limited. */
-  async function gate(ctx: HandlerCtx, tool: WriteTool, recipient: Resolved, extra: { fileInsideRoots?: boolean } = {}): Promise<Decision> {
+  /**
+   * Decides, and when the decision is allow, records the send inside the same serialised section. mark_read is not rate limited.
+   * `expect` is what this call would send: an accept counts only if the state it came back with was minted for exactly that.
+   */
+  async function gate(ctx: HandlerCtx, tool: WriteTool, recipient: Resolved, extra: { fileInsideRoots?: boolean; expect?: ConfirmState } = {}): Promise<Decision> {
     return serialised(async () => {
       const policy = await deps.loadPolicy();
       const rate = await deps.rateLimiter.snapshot(deps.now());
-      const decision = decide({ policy, tool, recipient, ...extra, rate, clientCanConfirm: clientCanConfirm(server, ctx), answer: readAnswer(ctx) });
+      const answer = extra.expect ? readAnswer(ctx, extra.expect) : 'none';
+      const decision = decide({ policy, tool, recipient, fileInsideRoots: extra.fileInsideRoots, rate, clientCanConfirm: clientCanConfirm(server, ctx), answer });
       if (decision.kind === 'allow' && tool !== 'mark_read') await deps.rateLimiter.record(deps.now());
       return decision;
     });
@@ -115,9 +132,11 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let release: (() => void) | null = null;
       try {
         recipient = await deps.resolver.resolve(a.to);
-        const d = await gate(ctx, 'send_text', recipient);
+        const send: TextSend = { text: a.message, replyTo: a.reply_to, replyToSender: a.reply_to_sender, mentions: a.mentions, linkPreview: a.link_preview };
+        const state = textState(recipient, send);
+        const d = await gate(ctx, 'send_text', recipient, { expect: state });
         if (d.kind === 'deny') return denied('send_text', recipient, d, { text: a.message });
-        if (d.kind === 'confirm') return confirmationRequired(`Send to ${label(recipient)}?\n\n${a.message}`);
+        if (d.kind === 'confirm') return await confirmationRequired(textPrompt(recipient, send), state);
         release = hold();
         const argv = ['send', 'text', `--to=${recipient.jid}`, `--message=${a.message}`];
         if (a.reply_to) argv.push(`--reply-to=${a.reply_to}`);
@@ -156,13 +175,13 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       try {
         recipient = await deps.resolver.resolve(a.to);
         const policy = await deps.loadPolicy();
-        const inside = await fileInsideRoots(a.path, policy.writes.fileRoots);
-        const d = await gate(ctx, 'send_file', recipient, { fileInsideRoots: inside });
+        const facts = (await fileInsideRoots(a.path, policy.writes.fileRoots)) ? await fileFacts(a.path) : null;
+        // Without facts the file is treated as outside the roots, so the gate refuses before these placeholder values are looked at.
+        const send: FileSend = { ...(facts ?? { realPath: a.path, size: 0, mtimeMs: 0 }), caption: a.caption, as: a.as, filename: a.filename };
+        const state = fileState(recipient, send);
+        const d = await gate(ctx, 'send_file', recipient, { fileInsideRoots: facts !== null, expect: state });
         if (d.kind === 'deny') return denied('send_file', recipient, d, { file: a.path });
-        if (d.kind === 'confirm') {
-          const size = await stat(a.path).then((s) => `${s.size} bytes`).catch(() => 'unknown size');
-          return confirmationRequired(`Send file to ${label(recipient)}?\n\n${a.path} (${size})${a.caption ? `\n${a.caption}` : ''}`);
-        }
+        if (d.kind === 'confirm') return await confirmationRequired(filePrompt(recipient, send), state);
         release = hold();
         const argv = ['send', 'file', `--to=${recipient.jid}`, `--file=${a.path}`];
         if (a.caption) argv.push(`--caption=${a.caption}`);
@@ -199,9 +218,11 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let release: (() => void) | null = null;
       try {
         recipient = await deps.resolver.resolve(a.chat);
-        const d = await gate(ctx, 'react', recipient);
+        const send: ReactSend = { reaction: a.reaction, messageId: a.message_id, sender: a.sender };
+        const state = reactState(recipient, send);
+        const d = await gate(ctx, 'react', recipient, { expect: state });
         if (d.kind === 'deny') return denied('react', recipient, d, { reaction: a.reaction, message_id: a.message_id });
-        if (d.kind === 'confirm') return confirmationRequired(`React with ${a.reaction || '(clear reaction)'} to message ${a.message_id} in ${label(recipient)}?`);
+        if (d.kind === 'confirm') return await confirmationRequired(reactPrompt(recipient, send), state);
         release = hold();
         const argv = ['send', 'react', `--to=${recipient.jid}`, `--id=${a.message_id}`, `--reaction=${a.reaction}`];
         if (a.sender) argv.push(`--sender=${a.sender}`);

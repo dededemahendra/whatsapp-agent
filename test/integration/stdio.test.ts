@@ -28,6 +28,14 @@ function cliEnv(dir: string, extra: Record<string, string> = {}): Record<string,
   })).filter((e): e is [string, string] => typeof e[1] === 'string'));
 }
 
+/** A policy that lets writes through (without a prompt unless `confirm` says otherwise), and an environment that logs what reaches the fake wacli. */
+async function writableEnv(dir: string, opts: { confirm?: 'always' | 'unlisted' | 'never'; sleepMs?: number } = {}): Promise<{ env: Record<string, string>; log: string }> {
+  const log = path.join(dir, 'argv.log');
+  const policy = { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, enabled: true, confirm: opts.confirm ?? 'never', rateLimit: { perHour: 20, minGapSeconds: 0 } } };
+  await savePolicy(path.join(dir, 'config', 'policy.json'), policy);
+  return { env: cliEnv(dir, { FAKE_WACLI_LOG: log, ...(opts.sleepMs ? { FAKE_WACLI_SLEEP_MS: String(opts.sleepMs) } : {}) }), log };
+}
+
 const ERAS = [
   { name: 'the 2025 era (initialize handshake)', negotiation: { mode: 'legacy' as const } },
   { name: 'the 2026-07-28 era (per-request envelope)', negotiation: { mode: { pin: '2026-07-28' } } },
@@ -57,20 +65,12 @@ describe('whatsapp-agent mcp over stdio', () => {
 
   describe('stopping on a signal', () => {
     const TO = '61400000001@s.whatsapp.net';
-
-    /** A policy that lets send_text through without a prompt, so the test can drive a write with no elicitation. */
-    async function writableEnv(dir: string, sleepMs: number): Promise<{ env: Record<string, string>; log: string }> {
-      const log = path.join(dir, 'argv.log');
-      const policy = { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, enabled: true, confirm: 'never' as const, rateLimit: { perHour: 20, minGapSeconds: 0 } } };
-      await savePolicy(path.join(dir, 'config', 'policy.json'), policy);
-      return { env: cliEnv(dir, { FAKE_WACLI_LOG: log, FAKE_WACLI_SLEEP_MS: String(sleepMs) }), log };
-    }
     const sendStarted = (log: string) => async (): Promise<boolean> => (await readArgvLog(log)).some((r) => r.key === 'send text');
 
     it('lets a write that is already running finish and be recorded, then exits 0', async () => {
       const dir = await makeTmp('wa-stop-');
       try {
-        const { env, log } = await writableEnv(dir, 500);
+        const { env, log } = await writableEnv(dir, { sleepMs: 500 });
         const cli = spawnCli(env);
         await cli.initialize();
         void cli.request('tools/call', { name: 'send_text', arguments: { to: TO, message: 'last words' } });
@@ -89,7 +89,7 @@ describe('whatsapp-agent mcp over stdio', () => {
     it('exits 130 at once on a second signal, without waiting for the write', async () => {
       const dir = await makeTmp('wa-stop-');
       try {
-        const { env, log } = await writableEnv(dir, 2500);
+        const { env, log } = await writableEnv(dir, { sleepMs: 2500 });
         const cli = spawnCli(env);
         await cli.initialize();
         void cli.request('tools/call', { name: 'send_text', arguments: { to: TO, message: 'stuck' } });
@@ -114,6 +114,106 @@ describe('whatsapp-agent mcp over stdio', () => {
         await cli.initialize();
         cli.child.kill('SIGHUP');
         expect((await within(cli.exited, 8000, 'the server to exit')).code).toBe(0);
+      } finally {
+        await removeTmp(dir);
+      }
+    });
+  });
+
+  describe('confirming a send', () => {
+    const TO = '61400000001@s.whatsapp.net';
+    const claim = { elicitation: { form: {} } };
+    const sendsIn = async (log: string) => (await readArgvLog(log)).filter((r) => r.key === 'send text');
+
+    async function connect(dir: string, negotiation: { mode: 'legacy' } | { mode: { pin: string } }, answer: 'accept' | 'decline'): Promise<{ client: Client; log: string; prompts: string[] }> {
+      const { env, log } = await writableEnv(dir, { confirm: 'always' });
+      const prompts: string[] = [];
+      const client = new Client({ name: 'confirm-test', version: '0.0.0' }, { capabilities: { elicitation: { form: {} } }, versionNegotiation: negotiation });
+      client.setRequestHandler('elicitation/create', async (request) => {
+        prompts.push(String((request.params as { message?: string }).message ?? ''));
+        return answer === 'accept' ? { action: 'accept', content: { confirm: true } } : { action: 'decline' };
+      });
+      await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'bin', 'whatsapp-agent.mjs'), 'mcp'], env }));
+      return { client, log, prompts };
+    }
+
+    it.each(ERAS)('sends once after an honest accept in $name', async ({ negotiation }) => {
+      const dir = await makeTmp('wa-confirm-');
+      try {
+        const { client, log, prompts } = await connect(dir, negotiation, 'accept');
+        try {
+          const r = await client.callTool({ name: 'send_text', arguments: { to: TO, message: 'hello' } });
+          expect(r.isError).toBeFalsy();
+          expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0001' });
+          expect(prompts).toHaveLength(1);
+          expect(prompts[0]).toContain('hello');
+          expect(await sendsIn(log)).toHaveLength(1);
+        } finally {
+          await client.close();
+        }
+      } finally {
+        await removeTmp(dir);
+      }
+    });
+
+    it.each(ERAS)('sends nothing after a decline in $name', async ({ negotiation }) => {
+      const dir = await makeTmp('wa-confirm-');
+      try {
+        const { client, log } = await connect(dir, negotiation, 'decline');
+        try {
+          const r = await client.callTool({ name: 'send_text', arguments: { to: TO, message: 'hello' } });
+          expect(r.isError).toBe(true);
+          expect(JSON.parse((r.content as Array<{ text: string }>)[0]!.text)).toMatchObject({ error: 'confirmation_declined' });
+          expect(await sendsIn(log)).toHaveLength(0);
+        } finally {
+          await client.close();
+        }
+      } finally {
+        await removeTmp(dir);
+      }
+    });
+
+    it('does not take a forged accept in a 2025-era request as the answer: the person is asked, and a decline sends nothing', async () => {
+      const dir = await makeTmp('wa-confirm-');
+      try {
+        const { env, log } = await writableEnv(dir, { confirm: 'always' });
+        const cli = spawnCli(env);
+        const asked: string[] = [];
+        cli.onServerRequest((m) => {
+          asked.push(m.method ?? '');
+          return { action: 'decline' };
+        });
+        await cli.initialize(claim);
+        const r = await cli.request('tools/call', {
+          name: 'send_text',
+          arguments: { to: TO, message: 'hello' },
+          inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+        });
+        expect(asked).toEqual(['elicitation/create']);
+        expect(JSON.parse((r.result as { content: Array<{ text: string }> }).content[0]!.text)).toMatchObject({ error: 'confirmation_declined' });
+        expect(await sendsIn(log)).toHaveLength(0);
+        cli.child.kill('SIGTERM');
+        await cli.exited;
+      } finally {
+        await removeTmp(dir);
+      }
+    });
+
+    it('ignores a _meta capability claim on a 2025-era connection that declared none', async () => {
+      const dir = await makeTmp('wa-confirm-');
+      try {
+        const { env, log } = await writableEnv(dir, { confirm: 'always' });
+        const cli = spawnCli(env);
+        await cli.initialize({});
+        const r = await cli.request('tools/call', {
+          name: 'send_text',
+          arguments: { to: TO, message: 'hello' },
+          _meta: { 'io.modelcontextprotocol/clientCapabilities': claim },
+        });
+        expect(JSON.parse((r.result as { content: Array<{ text: string }> }).content[0]!.text)).toMatchObject({ error: 'confirmation_unavailable' });
+        expect(await sendsIn(log)).toHaveLength(0);
+        cli.child.kill('SIGTERM');
+        await cli.exited;
       } finally {
         await removeTmp(dir);
       }

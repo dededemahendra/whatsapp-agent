@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { PKG_VERSION } from '../version.js';
+import { confirmCodec } from './confirm.js';
 import type { ServerDeps } from './deps.js';
 import { registerChatTools } from './tools/chats.js';
 import { registerContactTools } from './tools/contacts.js';
@@ -20,7 +21,8 @@ export const INSTRUCTIONS = [
 export function createServer(deps: ServerDeps): McpServer {
   const server = new McpServer(
     { name: 'whatsapp-agent', version: PKG_VERSION },
-    { instructions: INSTRUCTIONS, maxToolInputElements: 1000 },
+    // The SDK checks a confirmation's state (signature and age) before any tool runs, so a forged or stale one is answered with -32602.
+    { instructions: INSTRUCTIONS, maxToolInputElements: 1000, requestState: { verify: confirmCodec().verify } },
   );
   registerStatusTool(server, deps);
   registerChatTools(server, deps);

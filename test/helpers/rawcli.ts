@@ -16,6 +16,8 @@ export interface RawCli {
   /** Sends a request and resolves with the response that carries its id. */
   request(method: string, params?: unknown): Promise<RpcMessage>;
   notify(method: string, params?: unknown): void;
+  /** Answers requests the server sends to the client (elicitation, for one). Without a handler they are left unanswered. */
+  onServerRequest(handler: (message: RpcMessage) => unknown): void;
   /** Runs the 2025-era opening exchange: initialize, then the initialized notification. */
   initialize(capabilities?: Record<string, unknown>): Promise<RpcMessage>;
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
@@ -28,7 +30,9 @@ export function spawnCli(env: NodeJS.ProcessEnv): RawCli {
   const waiting = new Map<number | string, (m: RpcMessage) => void>();
   let buffer = '';
   let errText = '';
+  let serverRequest: ((message: RpcMessage) => unknown) | undefined;
   let nextId = 1;
+  const send = (message: unknown): void => { child.stdin.write(`${JSON.stringify(message)}\n`); };
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => {
     buffer += chunk;
@@ -42,6 +46,8 @@ export function spawnCli(env: NodeJS.ProcessEnv): RawCli {
         if (m.id !== undefined && waiting.has(m.id) && (m.result !== undefined || m.error !== undefined)) {
           waiting.get(m.id)!(m);
           waiting.delete(m.id);
+        } else if (m.id !== undefined && m.method !== undefined && serverRequest) {
+          send({ jsonrpc: '2.0', id: m.id, result: serverRequest(m) });
         }
       } catch {
         // the test that cares reads stdoutLines
@@ -54,7 +60,6 @@ export function spawnCli(env: NodeJS.ProcessEnv): RawCli {
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
     child.on('exit', (code, signal) => resolve({ code, signal }));
   });
-  const send = (message: unknown): void => { child.stdin.write(`${JSON.stringify(message)}\n`); };
   const request = (method: string, params?: unknown): Promise<RpcMessage> => {
     const id = nextId++;
     return new Promise((resolve) => {
@@ -65,6 +70,7 @@ export function spawnCli(env: NodeJS.ProcessEnv): RawCli {
   const notify = (method: string, params?: unknown): void => send({ jsonrpc: '2.0', method, ...(params === undefined ? {} : { params }) });
   return {
     child, stdoutLines, stderr: () => errText, request, notify, exited,
+    onServerRequest(handler) { serverRequest = handler; },
     async initialize(capabilities = {}) {
       const r = await request('initialize', { protocolVersion: '2025-06-18', capabilities, clientInfo: { name: 'raw-test', version: '0.0.0' } });
       notify('notifications/initialized');

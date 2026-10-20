@@ -23,6 +23,18 @@ export interface HarnessOptions {
   elicitation?: 'form' | 'none' | 'url-only';
   elicit?: (message: string) => { action: 'accept' | 'decline' | 'cancel'; content?: Record<string, unknown> };
   now?: Date;
+  /** The client does not answer input requests by itself, so a test can play each round (see callRound). */
+  manualRounds?: boolean;
+}
+
+/** What one round of a call returns when the client does not auto-fulfil: a result, or a request for input with the state to echo. */
+export interface Round {
+  resultType?: string;
+  inputRequests?: Record<string, { method: string; params: { message?: string } }>;
+  requestState?: string;
+  isError?: boolean;
+  structuredContent?: unknown;
+  content?: ToolResult['content'];
 }
 
 export interface Harness {
@@ -33,6 +45,8 @@ export interface Harness {
   elicitations: string[];
   argv(): Promise<ArgvRecord[]>;
   call(name: string, args?: Record<string, unknown>): Promise<ToolResult>;
+  /** One round of a call. Pass the answers and the state from the previous round to play the next. Needs manualRounds. */
+  callRound(name: string, args?: Record<string, unknown>, echo?: { inputResponses?: Record<string, unknown>; requestState?: string }): Promise<Round>;
   close(): Promise<void>;
 }
 
@@ -67,7 +81,10 @@ export async function makeHarness(opts: HarnessOptions = {}): Promise<Harness> {
   });
   const mode = opts.elicitation ?? 'form';
   const capabilities: ClientCapabilities = mode === 'form' ? { elicitation: { form: {} } } : mode === 'url-only' ? { elicitation: { url: {} } } : {};
-  const client = new Client({ name: 'harness', version: '0.0.0' }, { capabilities, versionNegotiation: { mode: 'auto' } });
+  const client = new Client(
+    { name: 'harness', version: '0.0.0' },
+    { capabilities, versionNegotiation: { mode: 'auto' }, ...(opts.manualRounds ? { inputRequired: { autoFulfill: false } } : {}) },
+  );
   const elicitations: string[] = [];
   if (mode !== 'none') {
     client.setRequestHandler('elicitation/create', async (request) => {
@@ -87,6 +104,7 @@ export async function makeHarness(opts: HarnessOptions = {}): Promise<Harness> {
     elicitations,
     argv: () => readArgvLog(log),
     call: async (name, args = {}) => (await client.callTool({ name, arguments: args })) as ToolResult,
+    callRound: async (name, args = {}, echo = {}) => (await client.callTool({ name, arguments: args, ...echo } as never, { allowInputRequired: true })) as Round,
     close: async () => {
       await client.close();
       await handler.close();
