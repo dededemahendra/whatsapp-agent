@@ -72,7 +72,7 @@ export function sameAllowTarget(a: string, b: string): boolean {
 function deny(code: DenyCode, retryAfterSeconds?: number): Decision {
   const message = retryAfterSeconds === undefined
     ? DENY_MESSAGES[code]
-    : `${DENY_MESSAGES[code]} Retry after ${retryAfterSeconds} seconds.`;
+    : `${DENY_MESSAGES[code]} Retry after ${retryAfterSeconds} ${retryAfterSeconds === 1 ? 'second' : 'seconds'}.`;
   return retryAfterSeconds === undefined ? { kind: 'deny', code, message } : { kind: 'deny', code, message, retryAfterSeconds };
 }
 

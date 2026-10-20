@@ -76,6 +76,20 @@ describe('decide', () => {
       .toMatchObject({ kind: 'deny', code: 'rate_limited', retryAfterSeconds: 3 });
     expect(decide(input({ policy: p, rate: { countLastHour: 19, secondsSinceLast: 5, secondsUntilWindowFrees: 1 } }))).toEqual({ kind: 'allow' });
   });
+  it('says "second" for one second and "seconds" for any other count in the retry hint', () => {
+    const p = policy({ confirm: 'never' });
+    const messageFor = (rate: DecideInput['rate']): string => {
+      const d = decide(input({ policy: p, rate }));
+      if (d.kind !== 'deny') throw new Error('expected a denial');
+      return d.message;
+    };
+    const base = 'Send rate limit reached. Wait before sending again.';
+    expect(messageFor({ countLastHour: 1, secondsSinceLast: 4, secondsUntilWindowFrees: 3000 })).toBe(`${base} Retry after 1 second.`);
+    expect(messageFor({ countLastHour: 1, secondsSinceLast: 3, secondsUntilWindowFrees: 3000 })).toBe(`${base} Retry after 2 seconds.`);
+    expect(messageFor({ countLastHour: 20, secondsSinceLast: 600, secondsUntilWindowFrees: 1 })).toBe(`${base} Retry after 1 second.`);
+    expect(messageFor({ countLastHour: 20, secondsSinceLast: 600, secondsUntilWindowFrees: 0.2 })).toBe(`${base} Retry after 1 second.`);
+    expect(messageFor({ countLastHour: 20, secondsSinceLast: 600, secondsUntilWindowFrees: 3600 })).toBe(`${base} Retry after 3600 seconds.`);
+  });
   it('asks for confirmation in always mode and allows after acceptance', () => {
     expect(decide(input())).toEqual({ kind: 'confirm' });
     expect(decide(input({ answer: 'accepted' }))).toEqual({ kind: 'allow' });
