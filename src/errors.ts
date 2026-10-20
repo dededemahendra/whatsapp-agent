@@ -39,6 +39,7 @@ export function toToolError(e: unknown): ToolErrorResult {
   const err = isAgentError(e)
     ? e
     : new AgentError('wacli_error', e instanceof Error ? e.message : String(e));
-  const body = { error: err.code, message: err.message, ...err.details };
+  const details = Object.fromEntries(Object.entries(err.details).filter(([k]) => k !== 'error' && k !== 'message'));
+  const body = { error: err.code, message: err.message, ...details };
   return { isError: true, content: [{ type: 'text', text: JSON.stringify(body) }] };
 }

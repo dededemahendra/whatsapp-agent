@@ -23,4 +23,9 @@ describe('AgentError', () => {
     expect(parsed.message).toBe('boom');
     expect(r.content[0]!.text).not.toContain('    at ');
   });
+
+  it('keeps the code and message when details use reserved keys', () => {
+    const r = toToolError(new AgentError('not_found', 'No such chat', { error: 'x', message: 'y', chat: 'z' }));
+    expect(JSON.parse(r.content[0]!.text)).toEqual({ error: 'not_found', message: 'No such chat', chat: 'z' });
+  });
 });
