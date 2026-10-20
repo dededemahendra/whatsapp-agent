@@ -2130,6 +2130,8 @@ import { makeTmp, removeTmp } from '../helpers/fake.js';
 const alice = { jid: '61400000001@s.whatsapp.net', name: 'Alice', kind: 'user' as const };
 const family = { jid: '120363000000000001@g.us', name: 'Family', kind: 'group' as const };
 const channel = { jid: '1@newsletter', name: 'News', kind: 'channel' as const };
+const broadcast = { jid: 'status@broadcast', name: null, kind: 'broadcast' as const };
+const unknown = { jid: 'x@weird', name: 'Odd', kind: 'unknown' as const };
 const calm = { countLastHour: 0, secondsSinceLast: null, secondsUntilWindowFrees: 0 };
 
 function policy(over: Partial<Policy['writes']> = {}): Policy {
@@ -2140,12 +2142,15 @@ function input(over: Partial<DecideInput> = {}): DecideInput {
 }
 
 describe('matchesAllow', () => {
-  it('matches by JID, formatted phone and case-insensitive name', () => {
+  it('matches by JID or phone number only, never by name', () => {
     expect(matchesAllow(['61400000001@s.whatsapp.net'], alice)).toBe(true);
     expect(matchesAllow(['+61 400 000 001'], alice)).toBe(true);
-    expect(matchesAllow(['alice'], alice)).toBe(true);
     expect(matchesAllow(['+61400000001@s.whatsapp.net'], alice)).toBe(true);
     expect(matchesAllow(['61400000001:7@s.whatsapp.net'], alice)).toBe(true);
+    expect(matchesAllow(['61400000001@S.WHATSAPP.NET'], alice)).toBe(true);
+    expect(matchesAllow(['61400000001@s.whatsapp.net'], { ...alice, jid: '61400000001:7@s.whatsapp.net' })).toBe(true);
+    expect(matchesAllow(['alice'], alice)).toBe(false);
+    expect(matchesAllow(['Alice'], alice)).toBe(false);
     expect(matchesAllow(['+61 400 000 002', 'Bob'], alice)).toBe(false);
     expect(matchesAllow([], alice)).toBe(false);
   });
@@ -2160,8 +2165,10 @@ describe('decide', () => {
     expect(decide(input({ tool: 'mark_read', policy: policy({ confirm: 'always' }) }))).toEqual({ kind: 'allow' });
     expect(decide(input({ tool: 'mark_read', recipient: family }))).toEqual({ kind: 'allow' });
   });
-  it('refuses channels', () => {
-    expect(decide(input({ recipient: channel, policy: policy({ confirm: 'never' }) }))).toMatchObject({ kind: 'deny', code: 'unsupported_target' });
+  it('refuses channels, broadcast lists and unknown kinds', () => {
+    for (const target of [channel, broadcast, unknown]) {
+      expect(decide(input({ recipient: target, policy: policy({ confirm: 'never' }) }))).toMatchObject({ kind: 'deny', code: 'unsupported_target' });
+    }
   });
   it('gates groups behind writes.groups', () => {
     expect(decide(input({ recipient: family, policy: policy({ confirm: 'never' }) }))).toMatchObject({ kind: 'deny', code: 'groups_disabled' });
@@ -2185,8 +2192,8 @@ describe('decide', () => {
     expect(decide(input({ answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
   });
   it('skips confirmation for allowlisted recipients in unlisted mode', () => {
-    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['Alice'] }) }))).toEqual({ kind: 'allow' });
-    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['Bob'] }) }))).toEqual({ kind: 'confirm' });
+    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 001'] }) }))).toEqual({ kind: 'allow' });
+    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 002'] }) }))).toEqual({ kind: 'confirm' });
   });
   it('denies when confirmation is needed but the client cannot show a form', () => {
     expect(decide(input({ clientCanConfirm: false }))).toMatchObject({ kind: 'deny', code: 'confirmation_unavailable' });
@@ -2266,7 +2273,7 @@ export type Decision =
 
 export const DENY_MESSAGES: Record<DenyCode, string> = {
   writes_disabled: 'Sending is turned off in the policy. The person can enable it with: whatsapp-agent policy enable',
-  unsupported_target: 'Channels are read-only in this version.',
+  unsupported_target: 'Only people and groups can receive messages. Channels, broadcast lists and unknown chat types are read-only in this version.',
   groups_disabled: 'Sending to groups is turned off. The person can enable it with: whatsapp-agent policy set groups on',
   file_outside_roots: 'That file is outside the allowed folders. The person can add a folder with: whatsapp-agent policy add-file-root <dir>',
   rate_limited: 'Send rate limit reached. Wait before sending again.',
@@ -2278,14 +2285,15 @@ export function jidUser(jid: string): string {
   return (jid.split('@')[0] ?? '').split(':')[0] ?? '';
 }
 
+/** Entries are phone numbers (compared by digits) or JIDs. Names never match: display names are chosen by other people. */
 export function matchesAllow(allow: string[], r: Resolved): boolean {
-  const user = jidUser(r.jid);
+  const jid = canonicalJid(r.jid).toLowerCase();
+  const user = jidUser(jid);
   for (const raw of allow) {
-    const e = raw.trim();
+    const e = raw.trim().toLowerCase();
     if (e === '') continue;
-    if (JID_RE.test(e) && canonicalJid(e).toLowerCase() === r.jid.toLowerCase()) return true;
+    if (JID_RE.test(e) && canonicalJid(e) === jid) return true;
     if (looksLikePhone(e) && digitsOf(e) === user) return true;
-    if (r.name && e.toLowerCase() === r.name.toLowerCase()) return true;
   }
   return false;
 }
@@ -2301,7 +2309,7 @@ export function decide(i: DecideInput): Decision {
   const w = i.policy.writes;
   if (!w.enabled) return deny('writes_disabled');
   if (i.tool === 'mark_read') return { kind: 'allow' };
-  if (i.recipient.kind === 'channel') return deny('unsupported_target');
+  if (i.recipient.kind !== 'user' && i.recipient.kind !== 'group') return deny('unsupported_target');
   if (i.recipient.kind === 'group' && !w.groups) return deny('groups_disabled');
   if (i.tool === 'send_file' && i.fileInsideRoots !== true) return deny('file_outside_roots');
 

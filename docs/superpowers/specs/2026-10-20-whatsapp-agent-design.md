@@ -666,3 +666,10 @@ overrides the earlier text where they differ.
   request for the international format, instead of building a JID.
 - A17. wacli encodes an empty list as `null`. Every list read goes through
   `asList`, which treats anything that is not an array as empty.
+- A18. Write gate: only recipients of kind `user` or `group` can receive
+  writes; `channel`, `broadcast` (including `status@broadcast`) and `unknown`
+  are `unsupported_target`. Allowlist entries match by phone number or JID
+  only; name entries never match, because display names are chosen by other
+  people. `policy allow <name>` resolves the name once through the resolver
+  and stores the canonical JID; `policy show` flags entries that are neither
+  a phone number nor a JID as inert.
