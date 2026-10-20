@@ -33,12 +33,15 @@ export type MatchField = 'name' | 'alias' | 'system_name';
 export type Matchable = Resolved & { alias?: string | null; system_name?: string | null };
 /** A candidate in an ambiguous_recipient error. `matched_on` says which name matched, and appears for contacts only. */
 export type Candidate = Resolved & { matched_on?: MatchField };
+/** The most candidates an ambiguity lists. `total` counts every match, so the person is told how many there really were. */
+export const AMBIGUOUS_LIMIT = 10;
+
 /** `partial` appears only in exact mode: the one candidate that contains the input without matching it exactly. */
 export type PickResult =
   | { kind: 'none' }
   | { kind: 'one'; value: Resolved }
   | { kind: 'partial'; candidate: Candidate }
-  | { kind: 'many'; candidates: Candidate[] };
+  | { kind: 'many'; candidates: Candidate[]; total: number };
 
 /** Case-insensitive, trimmed and NFC-normalised, so the same name typed in another Unicode form still matches. */
 const fold = (s: string): string => s.trim().normalize('NFC').toLowerCase().normalize('NFC');
@@ -76,13 +79,14 @@ export function pickUnique(candidates: Matchable[], input: string, opts: Resolve
   }
   // Exact matches first, each group in lookup order, and the cap after that: a crowd of partial matches must not push an exact one out of the list.
   const ordered = [...exact, ...candidates.filter((c) => !exact.includes(c))];
-  return { kind: 'many', candidates: ordered.slice(0, 10).map((c) => labelled(c, needle)) };
+  return { kind: 'many', total: ordered.length, candidates: ordered.slice(0, AMBIGUOUS_LIMIT).map((c) => labelled(c, needle)) };
 }
 
-function ambiguous(input: string, candidates: Candidate[]): AgentError {
+function ambiguous(input: string, candidates: Candidate[], total: number): AgentError {
+  const cut = total > candidates.length ? ` Showing the first ${candidates.length}.` : '';
   return new AgentError('ambiguous_recipient',
-    `"${input}" matches ${candidates.length} chats or contacts. Ask the person which one, or pass the JID.`,
-    { candidates });
+    `"${input}" matches ${total} chats or contacts.${cut} Ask the person which one, or pass the JID.`,
+    { candidates, total });
 }
 
 function notExactly(input: string, candidates: Candidate[]): AgentError {
@@ -118,7 +122,7 @@ export function createResolver(runner: Runner): Resolver {
     const chats = asList(await runner.read<WacliChat[] | null>(['chats', 'list', `--query=${input}`, '--limit=50']));
     const fromChats = pickUnique(chats.map((c) => ({ jid: c.jid, name: nonEmpty(c.name), kind: kindFromWacli(c.kind, c.jid) })), input, { exact });
     if (fromChats.kind === 'one') return fromChats.value;
-    if (fromChats.kind === 'many') throw ambiguous(input, fromChats.candidates);
+    if (fromChats.kind === 'many') throw ambiguous(input, fromChats.candidates, fromChats.total);
     if (fromChats.kind === 'partial') partials.push(fromChats.candidate);
 
     // An exact contact still wins over a lone partial chat, so the contacts are searched either way.
@@ -127,7 +131,7 @@ export function createResolver(runner: Runner): Resolver {
       jid: canonicalJid(c.jid), name: nonEmpty(c.name) ?? nonEmpty(c.alias), kind: 'user' as const, alias: nonEmpty(c.alias), system_name: nonEmpty(c.system_name),
     })), input, { exact });
     if (fromContacts.kind === 'one') return fromContacts.value;
-    if (fromContacts.kind === 'many') throw ambiguous(input, fromContacts.candidates);
+    if (fromContacts.kind === 'many') throw ambiguous(input, fromContacts.candidates, fromContacts.total);
     if (fromContacts.kind === 'partial' && !partials.some((p) => p.jid === fromContacts.candidate.jid)) partials.push(fromContacts.candidate);
 
     if (partials.length > 0) throw notExactly(input, partials);

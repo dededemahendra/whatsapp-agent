@@ -43,7 +43,7 @@ describe('pickUnique', () => {
     expect(pickUnique([b], 'dad')).toEqual({ kind: 'one', value: b });
   });
   it('reports two partial matches and no exact match as many', () => {
-    expect(pickUnique([a, b], 'mu')).toEqual({ kind: 'many', candidates: [a, b] });
+    expect(pickUnique([a, b], 'mu')).toEqual({ kind: 'many', total: 2, candidates: [a, b] });
   });
   it('reports none', () => {
     expect(pickUnique([], 'x')).toEqual({ kind: 'none' });
@@ -277,7 +277,7 @@ describe('resolver pins', () => {
   it('pickUnique reports two chats with the same name as many, in list order', () => {
     const first = { jid: 'a@s.whatsapp.net', name: 'Mum', kind: 'user' as const };
     const second = { jid: 'b@g.us', name: 'Mum', kind: 'group' as const };
-    expect(pickUnique([first, second], 'mum')).toEqual({ kind: 'many', candidates: [first, second] });
+    expect(pickUnique([first, second], 'mum')).toEqual({ kind: 'many', total: 2, candidates: [first, second] });
   });
 
   it('sends an input that starts with dashes as --query=--help for chats and after -- for contacts', async () => {
@@ -487,5 +487,71 @@ describe('exact matches come first among the candidates', () => {
     const r = pickUnique(rows, 'zed');
     expect(r.kind).toBe('many');
     if (r.kind === 'many') expect(r.candidates.map((c) => c.jid)).toEqual(['c@s.whatsapp.net', 'd@s.whatsapp.net', 'a@s.whatsapp.net', 'b@s.whatsapp.net']);
+  });
+});
+
+describe('the ambiguity message counts every match, not just the ones listed', () => {
+  const chat = (n: number, name: string) =>
+    ({ jid: `1203630000000${String(n).padStart(5, '0')}@g.us`, kind: 'group', name, last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 });
+  const envelope = (rows: unknown[]) => JSON.stringify({ success: true, data: rows, error: null });
+
+  async function ambiguousFor(count: number, opts: { exact?: boolean } = {}): Promise<{ message: string; details: { candidates: unknown[]; total: number } }> {
+    const rows = Array.from({ length: count }, (_, i) => chat(i + 1, `Zed ${i + 1}`));
+    const dir = await fixturesWith({ 'chats_list.json': envelope(rows) });
+    try {
+      return await resolver({ FAKE_WACLI_FIXTURES: dir }).resolve('zed', opts).then(
+        () => { throw new Error('expected an ambiguity'); },
+        (e: unknown) => e as { message: string; details: { candidates: unknown[]; total: number } },
+      );
+    } finally {
+      await removeTmp(dir);
+    }
+  }
+
+  it('says 14 when 14 matched, adds the sentence about the cut, and lists 10', async () => {
+    const e = await ambiguousFor(14);
+    expect(e.message).toBe('"zed" matches 14 chats or contacts. Showing the first 10. Ask the person which one, or pass the JID.');
+    expect(e.details.candidates).toHaveLength(10);
+    expect(e.details.total).toBe(14);
+  });
+
+  it('says 3 when 3 matched, with no sentence about a cut', async () => {
+    const e = await ambiguousFor(3);
+    expect(e.message).toBe('"zed" matches 3 chats or contacts. Ask the person which one, or pass the JID.');
+    expect(e.details.candidates).toHaveLength(3);
+    expect(e.details.total).toBe(3);
+  });
+
+  it('adds no sentence at exactly 10, and adds it from 11', async () => {
+    expect((await ambiguousFor(10)).message).toBe('"zed" matches 10 chats or contacts. Ask the person which one, or pass the JID.');
+    expect((await ambiguousFor(11)).message).toBe('"zed" matches 11 chats or contacts. Showing the first 10. Ask the person which one, or pass the JID.');
+  });
+
+  it('counts the same way when a write asks for an exact name', async () => {
+    const e = await ambiguousFor(14, { exact: true });
+    expect(e.message).toContain('"zed" matches 14 chats or contacts. Showing the first 10.');
+    expect(e.details.total).toBe(14);
+  });
+
+  it('counts exact matches that come after the partial ones in the total, and lists them first', async () => {
+    const rows = [...Array.from({ length: 12 }, (_, i) => chat(i + 1, `Zed ${i + 1}`)), chat(101, 'Zed'), chat(102, 'ZED')];
+    const dir = await fixturesWith({ 'chats_list.json': envelope(rows) });
+    try {
+      const e = await resolver({ FAKE_WACLI_FIXTURES: dir }).resolve('zed').catch((x: unknown) => x) as { message: string; details: { candidates: Array<{ name: string }>; total: number } };
+      expect(e.message).toContain('"zed" matches 14 chats or contacts. Showing the first 10.');
+      expect(e.details.candidates.slice(0, 2).map((c) => c.name)).toEqual(['Zed', 'ZED']);
+    } finally {
+      await removeTmp(dir);
+    }
+  });
+
+  it('pickUnique reports the full count with the capped list', () => {
+    const rows = Array.from({ length: 14 }, (_, i) => ({ jid: `${i}@s.whatsapp.net`, name: `Zed ${i}`, kind: 'user' as const }));
+    const r = pickUnique(rows, 'zed');
+    expect(r.kind).toBe('many');
+    if (r.kind === 'many') {
+      expect(r.total).toBe(14);
+      expect(r.candidates).toHaveLength(10);
+    }
   });
 });

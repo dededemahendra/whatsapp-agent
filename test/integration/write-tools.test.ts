@@ -275,6 +275,48 @@ describe('react and mark_read', () => {
   });
 });
 
+describe('an ambiguous name reaches the agent with the true count', () => {
+  const row = (n: number) => ({ jid: `1203630000000${String(n).padStart(5, '0')}@g.us`, kind: 'group', name: `Zed ${n}`, last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 });
+  const withRows = async (count: number, fn: (env: Record<string, string>) => Promise<void>): Promise<void> => {
+    const dir = await fixturesWith({ 'chats_list.json': JSON.stringify({ success: true, data: Array.from({ length: count }, (_, i) => row(i + 1)), error: null }) });
+    try {
+      await fn({ FAKE_WACLI_FIXTURES: dir });
+    } finally {
+      await removeTmp(dir);
+    }
+  };
+
+  it('says 14, that only the first 10 are shown, and lists 10 with the total beside them', async () => {
+    await withRows(14, async (env) => {
+      h = await makeHarness({ policy: enabled({ confirm: 'never' }), env });
+      const e = errorOf(await h.call('send_text', { to: 'zed', message: 'hello' }));
+      expect(e.error).toBe('ambiguous_recipient');
+      expect(e.message).toBe('"zed" matches 14 chats or contacts. Showing the first 10. Ask the person which one, or pass the JID.');
+      expect((e.candidates as unknown[]).length).toBe(10);
+      expect(e.total).toBe(14);
+      expect((await h.argv()).filter((x) => x.key === 'send text')).toHaveLength(0);
+    });
+  });
+
+  it('says 3 and nothing about a cut when 3 matched', async () => {
+    await withRows(3, async (env) => {
+      h = await makeHarness({ policy: enabled({ confirm: 'never' }), env });
+      const e = errorOf(await h.call('send_text', { to: 'zed', message: 'hello' }));
+      expect(e.message).toBe('"zed" matches 3 chats or contacts. Ask the person which one, or pass the JID.');
+      expect((e.candidates as unknown[]).length).toBe(3);
+      expect(e.total).toBe(3);
+    });
+  });
+
+  it('is the same for a read tool, which resolves the name the same way', async () => {
+    await withRows(14, async (env) => {
+      h = await makeHarness({ env });
+      const e = errorOf(await h.call('read_messages', { chat: 'zed' }));
+      expect(e.message).toBe('"zed" matches 14 chats or contacts. Showing the first 10. Ask the person which one, or pass the JID.');
+    });
+  });
+});
+
 describe('names are matched exactly for writes', () => {
   const PLUMBING = '61400000012@s.whatsapp.net';
   const row = (jid: string, name: string) => ({ jid, kind: 'dm', name, last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 });

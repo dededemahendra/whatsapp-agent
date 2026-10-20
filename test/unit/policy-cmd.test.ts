@@ -6,7 +6,7 @@ import { addFileRoot, allowRecipient, disableWrites, enableWrites, formatPolicy,
 import { DEFAULT_POLICY, loadPolicy, savePolicy } from '../../src/policy/schema.js';
 import { createResolver, type Resolver } from '../../src/wacli/resolve.js';
 import { createRunner } from '../../src/wacli/runner.js';
-import { FAKE_WACLI, fakeEnv, makeTmp, removeTmp } from '../helpers/fake.js';
+import { FAKE_WACLI, fakeEnv, fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
 
 let tmp: string;
 let file: string;
@@ -179,6 +179,25 @@ describe('policy command output for an ambiguous name', () => {
       expect(r.exitCode).toBe(1);
     }
     expect((await loadPolicy(file)).writes.allow).toEqual(['61400000009@s.whatsapp.net']);
+  });
+
+  it('counts every match when more than 10 matched, says the list was cut, and lists the first 10', async () => {
+    const chat = (n: number) => ({ jid: `1203630000000${String(n).padStart(5, '0')}@g.us`, kind: 'group', name: `Zed ${n}`, last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 });
+    const dir = await fixturesWith({ 'chats_list.json': JSON.stringify({ success: true, data: Array.from({ length: 14 }, (_, i) => chat(i + 1)), error: null }) });
+    try {
+      const many = (): PolicyCommandDeps => ({ isTTY: () => true, makeResolver: () => createResolver(createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_FIXTURES: dir }) })) });
+      for (const verb of ['allow', 'remove']) {
+        const r = await runPolicy([verb, 'zed'], many());
+        const lines = r.err.trimEnd().split('\n');
+        expect(lines[0]).toBe('"zed" matches 14 chats or contacts. Showing the first 10. Pass the JID of the one you mean:');
+        expect(lines).toHaveLength(11);
+        expect(lines[1]).toBe('  Zed 1  120363000000000001@g.us');
+        expect(lines[10]).toBe('  Zed 10  120363000000000010@g.us');
+        expect(r.exitCode).toBe(1);
+      }
+    } finally {
+      await removeTmp(dir);
+    }
   });
 
   it('allows and removes a name end to end through the command', async () => {

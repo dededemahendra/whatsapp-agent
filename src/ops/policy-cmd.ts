@@ -118,8 +118,9 @@ const realResolver = (account: string | null): Resolver =>
   createResolver(createRunner({ bin: process.env.WHATSAPP_AGENT_WACLI_BIN || 'wacli', account, baseEnv: process.env }));
 
 /** The person has to choose among several matches, so list them with their JIDs rather than crash. */
-export function formatAmbiguous(input: string, candidates: Array<{ jid: string; name: string | null }>): string {
-  const lines = [`"${stripControls(input)}" matches ${candidates.length} chats or contacts. Pass the JID of the one you mean:`];
+export function formatAmbiguous(input: string, candidates: Array<{ jid: string; name: string | null }>, total: number = candidates.length): string {
+  const cut = total > candidates.length ? ` Showing the first ${candidates.length}.` : '';
+  const lines = [`"${stripControls(input)}" matches ${total} chats or contacts.${cut} Pass the JID of the one you mean:`];
   for (const c of candidates) lines.push(`  ${c.name ? stripControls(c.name) : '(no name)'}  ${c.jid}`);
   return lines.join('\n') + '\n';
 }
@@ -142,7 +143,9 @@ export function policyCommand(deps: PolicyCommandDeps = {}): Command {
       out(await run());
     } catch (e) {
       if (!(e instanceof AgentError) || e.code !== 'ambiguous_recipient') throw e;
-      process.stderr.write(formatAmbiguous(input, (e.details.candidates ?? []) as Array<{ jid: string; name: string | null }>));
+      const candidates = (e.details.candidates ?? []) as Array<{ jid: string; name: string | null }>;
+      const total = typeof e.details.total === 'number' ? e.details.total : candidates.length;
+      process.stderr.write(formatAmbiguous(input, candidates, total));
       process.exitCode = 1;
     }
   };
