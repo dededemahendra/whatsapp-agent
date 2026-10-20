@@ -115,6 +115,42 @@ describe('send_text', () => {
     expect(await sendArgv()).toHaveLength(2);
   });
 
+  it('re-checks every rule when the confirmation answer arrives', async () => {
+    h = await makeHarness({
+      policy: enabled(),
+      elicit: () => {
+        h.deps.startupPolicy.writes.enabled = false;
+        return { action: 'accept', content: { confirm: true } };
+      },
+    });
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(errorOf(r).error).toBe('writes_disabled');
+    expect(h.elicitations).toHaveLength(1);
+    expect(await sendArgv()).toHaveLength(0);
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'denied', reason: 'writes_disabled' });
+    await h.close();
+
+    h = await makeHarness({
+      policy: enabled(),
+      elicit: () => {
+        h.deps.startupPolicy.writes.rateLimit.perHour = 0;
+        return { action: 'accept', content: { confirm: true } };
+      },
+    });
+    const limited = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(errorOf(limited)).toMatchObject({ error: 'rate_limited', retry_after_seconds: expect.any(Number) });
+    expect(await sendArgv()).toHaveLength(0);
+  });
+
+  it('reports a completed send as sent even when the audit log cannot be written', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    h.deps.audit = async () => { throw new Error('ENOSPC: no space left on device'); };
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0001' });
+    expect(await sendArgv()).toHaveLength(1);
+  });
+
   it('reports an ambiguous recipient and a wacli failure as failed audits', async () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
     expect(errorOf(await h.call('send_text', { to: 'a', message: 'x' })).error).toBe('ambiguous_recipient');
