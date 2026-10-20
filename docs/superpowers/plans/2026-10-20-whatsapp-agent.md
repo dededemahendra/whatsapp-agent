@@ -5211,11 +5211,11 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 `test/unit/service.test.ts`:
 
 ```ts
-import { writeFile } from 'node:fs/promises';
+import { appendFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServiceManager, isGlobalInstall, launchdPlist, launchdPlistPath, systemdUnit, systemdUnitPath, type ServicePaths } from '../../src/ops/service.js';
-import { tailFile } from '../../src/ops/tail.js';
+import { followFile, tailFile } from '../../src/ops/tail.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 const sp: ServicePaths = {
@@ -5325,6 +5325,18 @@ describe('tailFile', () => {
     expect(await tailFile(f, 2)).toBe('c\nd\n');
     expect(await tailFile(f, 10)).toBe('a\nb\nc\nd\n');
     expect(await tailFile(path.join(tmp, 'missing'), 3)).toBe('');
+  });
+
+  it('followFile prints only bytes appended after it starts, intact after multi-byte text', async () => {
+    const f = path.join(tmp, 'log');
+    await writeFile(f, 'old line \u2713\n');
+    const chunks: string[] = [];
+    const stop = followFile(f, (c) => chunks.push(c), 20);
+    await new Promise((r) => setTimeout(r, 60));
+    await appendFile(f, 'NEWLINE-ONE\n');
+    await new Promise((r) => setTimeout(r, 80));
+    stop();
+    expect(chunks.join('')).toBe('NEWLINE-ONE\n');
   });
 });
 ```
@@ -5567,22 +5579,24 @@ export async function tailFile(file: string, lines: number): Promise<string> {
   return all.slice(Math.max(0, all.length - lines)).map((l) => l + '\n').join('');
 }
 
-/** Print appended bytes every second until the returned function is called. */
-export function followFile(file: string, write: (chunk: string) => void): () => void {
-  let offset = 0;
-  const timer = setInterval(async () => {
+/** Print bytes appended after the call, polling every `intervalMs`, until the returned function is called. */
+export function followFile(file: string, write: (chunk: string) => void, intervalMs = 1000): () => void {
+  let offset = -1;
+  const poll = async (): Promise<void> => {
     try {
       const size = (await stat(file)).size;
-      if (size < offset) offset = 0;
+      if (offset < 0 || size < offset) offset = size;
       if (size > offset) {
-        const text = await readFile(file, 'utf8');
-        write(text.slice(offset));
+        const bytes = await readFile(file);
+        write(bytes.subarray(offset, size).toString('utf8'));
         offset = size;
       }
     } catch {
       // file may not exist yet
     }
-  }, 1000);
+  };
+  void poll();
+  const timer = setInterval(() => { void poll(); }, intervalMs);
   return () => clearInterval(timer);
 }
 ```
@@ -5592,7 +5606,7 @@ Replace `src/ops/daemon-cmd.ts` with:
 ```ts
 import { Command } from 'commander';
 import { AgentError } from '../errors.js';
-import { resolvePaths } from '../paths.js';
+import { ensureDirs, resolvePaths } from '../paths.js';
 import { loadPolicy } from '../policy/schema.js';
 import { startSupervisor } from './daemon.js';
 import { isGlobalInstall, serviceManagerForThisMachine, servicePathsForThisMachine } from './service.js';
@@ -5619,6 +5633,7 @@ export function daemonCommand(): Command {
 
   cmd.command('install').description('Install the sync daemon as a login service (launchd or systemd)').action(async () => {
     const paths = resolvePaths();
+    await ensureDirs(paths);
     const sp = servicePathsForThisMachine(paths);
     if (!isGlobalInstall(sp.cliPath)) {
       throw new AgentError('invalid_input', 'daemon install needs a global install so the service has a stable path. Run: npm i -g whatsapp-agent, then: whatsapp-agent daemon install');
