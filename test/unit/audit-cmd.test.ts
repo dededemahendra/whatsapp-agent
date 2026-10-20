@@ -13,6 +13,20 @@ describe('audit formatting', () => {
     expect(lines[0]).toBe('2026-10-20T10:00:00.000Z  sent    send_text  Alice (1@s.whatsapp.net)  id=A  "hi"');
     expect(lines[1]).toBe('2026-10-20T10:01:00.000Z  denied  send_text  1@s.whatsapp.net  rate_limited');
   });
+  it('strips C0 and C1 control characters from names, text, paths and the other printed fields', () => {
+    const text = formatAudit([
+      {
+        ts: '2026-10-20T10:00:00.000Z', tool: 'send_file', to_jid: '1@s.whatsapp.net', to_name: 'Al\u001b[31mice\u0007', kind: 'user', outcome: 'sent',
+        message_id: 'ID\u009b1', reason: 're\u0000ason', text: 'a\u009bb\nc\u007f', file: '/tmp/x\u0000y\r.pdf', reaction: '\u001b[2J+1',
+      },
+      { ts: '2026-10-20T10:01:00.000Z', tool: 'react', to_jid: '2@s.whatsapp.net', to_name: '\u001b\u0007', kind: 'user', outcome: 'denied', reason: 'rate_limited' },
+    ]);
+    expect(text).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+    const lines = text.trim().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe('2026-10-20T10:00:00.000Z  sent    send_file  Al[31mice (1@s.whatsapp.net)  id=ID1  reason  "abc"  /tmp/xy.pdf  reaction=[2J+1');
+    expect(lines[1]).toBe('2026-10-20T10:01:00.000Z  denied  react  2@s.whatsapp.net  rate_limited');
+  });
   it('says so when empty', () => {
     expect(formatAudit([])).toBe('No audit records.\n');
   });

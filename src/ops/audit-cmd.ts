@@ -2,17 +2,21 @@ import { Command } from 'commander';
 import { AgentError } from '../errors.js';
 import { resolvePaths } from '../paths.js';
 import { readAudit, type AuditRecord } from '../policy/audit.js';
+import { stripControls } from './text.js';
 
+/** Names, text and paths in the log came from other people or from the agent, so control characters are removed before they reach a terminal. */
 export function formatAudit(records: AuditRecord[]): string {
   if (records.length === 0) return 'No audit records.\n';
   const lines = records.map((r) => {
-    const who = r.to_name ? `${r.to_name} (${r.to_jid})` : (r.to_jid ?? '(unresolved)');
-    const parts = [r.ts, r.outcome.padEnd(6), r.tool, who];
-    if (r.message_id) parts.push(`id=${r.message_id}`);
-    if (r.reason) parts.push(r.reason);
-    if (r.text) parts.push(JSON.stringify(r.text));
-    if (r.file) parts.push(r.file);
-    if (r.reaction) parts.push(`reaction=${r.reaction}`);
+    const name = r.to_name ? stripControls(r.to_name) : '';
+    const jid = r.to_jid === null ? null : stripControls(r.to_jid);
+    const who = name ? `${name} (${jid})` : (jid ?? '(unresolved)');
+    const parts = [stripControls(r.ts), stripControls(r.outcome).padEnd(6), stripControls(r.tool), who];
+    if (r.message_id) parts.push(`id=${stripControls(r.message_id)}`);
+    if (r.reason) parts.push(stripControls(r.reason));
+    if (r.text) parts.push(JSON.stringify(stripControls(r.text)));
+    if (r.file) parts.push(stripControls(r.file));
+    if (r.reaction) parts.push(`reaction=${stripControls(r.reaction)}`);
     return parts.join('  ');
   });
   return lines.join('\n') + '\n';
