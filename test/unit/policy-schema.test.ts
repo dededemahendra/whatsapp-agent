@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_POLICY, loadPolicy, PolicySchema, savePolicy } from '../../src/policy/schema.js';
@@ -55,6 +55,24 @@ describe('policy schema', () => {
     await expect(savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: [''] } }))
       .rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining(file) });
     await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('leaves exactly one file and no temp file when two saves run at once, still owner-only', async () => {
+    const file = path.join(tmp, 'cfg', 'policy.json');
+    const a = { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: ['+61 400 000 001'] } };
+    const b = { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: ['+61 400 000 002'] } };
+    await Promise.all([savePolicy(file, a), savePolicy(file, b)]);
+    expect(await readdir(path.dirname(file))).toEqual(['policy.json']);
+    expect([a, b]).toContainEqual(await loadPolicy(file));
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
+  });
+
+  it('removes its temp file when the rename fails', async () => {
+    const dir = path.join(tmp, 'cfg');
+    const file = path.join(dir, 'policy.json');
+    await mkdir(file, { recursive: true }); // a directory where the file belongs, so the rename cannot succeed
+    await expect(savePolicy(file, DEFAULT_POLICY)).rejects.toBeDefined();
+    expect((await readdir(dir)).filter((n) => n.endsWith('.tmp'))).toEqual([]);
   });
 
   it('throws invalid_input when the policy path cannot be read', async () => {

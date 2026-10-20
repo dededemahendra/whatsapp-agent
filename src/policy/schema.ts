@@ -1,4 +1,4 @@
-import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import * as z from 'zod/v4';
 import { AgentError } from '../errors.js';
@@ -84,13 +84,22 @@ export async function loadPolicy(file: string): Promise<Policy> {
   return result.data;
 }
 
+let saveSeq = 0;
+
+/** Writes through a temp file named for this process and call, so two saves never share one, and removes it if the rename fails. */
 export async function savePolicy(file: string, policy: Policy): Promise<void> {
   const result = PolicySchema.safeParse(policy);
   if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error)}`);
   const data = result.data;
   await ensurePrivateDir(path.dirname(file));
-  const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
-  await chmod(tmp, 0o600);
-  await rename(tmp, file);
+  saveSeq += 1;
+  const tmp = `${file}.${process.pid}.${saveSeq}.tmp`;
+  try {
+    await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+    await chmod(tmp, 0o600);
+    await rename(tmp, file);
+  } catch (e) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw e;
+  }
 }
