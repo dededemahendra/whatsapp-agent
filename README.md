@@ -91,7 +91,7 @@ whatsapp-agent policy disable
 - Validation errors for malformed tool input come back from the MCP SDK as plain text; only tool-level errors carry the `{"error", "message"}` JSON shape.
 - Rate limit: 20 sends an hour and 5 seconds between sends by default.
 
-Changes take effect on the next tool call; no restart needed. The exceptions are limits, account and the daemon settings, which are read at start: restart the MCP server or the daemon after changing them.
+Changes take effect on the next tool call; no restart needed. The exceptions are the limits, account and daemon blocks of policy.json, which are read at start: restart the MCP server (reconnect your host), and for the daemon run `whatsapp-agent daemon install` again, which restarts the service.
 
 ## Audit
 
