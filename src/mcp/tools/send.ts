@@ -5,7 +5,7 @@ import * as z from 'zod/v4';
 import { AgentError, toToolError } from '../../errors.js';
 import { debug } from '../../log.js';
 import type { AuditRecord } from '../../policy/audit.js';
-import { decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
+import { DENY_MESSAGES, decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
 import type { Resolved } from '../../wacli/resolve.js';
 import type { WacliChatStateResult, WacliSendResult } from '../../wacli/shape.js';
 import {
@@ -101,9 +101,15 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     });
   }
 
-  async function denied(tool: WriteTool, recipient: Resolved, d: Deny, extra: Partial<AuditRecord>): Promise<CallToolResult> {
+  async function denied(tool: WriteTool, recipient: Resolved | null, d: Deny, extra: Partial<AuditRecord>): Promise<CallToolResult> {
     await record({ ...base(tool, recipient), outcome: 'denied', reason: d.code, ...extra });
     return toToolError(new AgentError(d.code, d.message, d.retryAfterSeconds === undefined ? {} : { retry_after_seconds: d.retryAfterSeconds }));
+  }
+
+  /** The master switch, read before the recipient is looked up, so a switched-off server does not query wacli for a write it will refuse. */
+  async function switchedOff(tool: WriteTool, extra: Partial<AuditRecord>): Promise<CallToolResult | null> {
+    if ((await deps.loadPolicy()).writes.enabled) return null;
+    return denied(tool, null, { kind: 'deny', code: 'writes_disabled', message: DENY_MESSAGES.writes_disabled }, extra);
   }
 
   async function failed(tool: WriteTool, recipient: Resolved | null, e: unknown, extra: Partial<AuditRecord>): Promise<CallToolResult> {
@@ -131,6 +137,8 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
       try {
+        const off = await switchedOff('send_text', { text: a.message });
+        if (off) return off;
         recipient = await deps.resolver.resolve(a.to, { exact: true });
         const send: TextSend = { text: a.message, replyTo: a.reply_to, replyToSender: a.reply_to_sender, mentions: a.mentions, linkPreview: a.link_preview };
         const state = textState(recipient, send);
@@ -173,6 +181,8 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
       try {
+        const off = await switchedOff('send_file', { file: a.path });
+        if (off) return off;
         recipient = await deps.resolver.resolve(a.to, { exact: true });
         const policy = await deps.loadPolicy();
         const facts = (await fileInsideRoots(a.path, policy.writes.fileRoots)) ? await fileFacts(a.path) : null;
@@ -217,6 +227,8 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
       try {
+        const off = await switchedOff('react', { reaction: a.reaction, message_id: a.message_id });
+        if (off) return off;
         recipient = await deps.resolver.resolve(a.chat, { exact: true });
         const send: ReactSend = { reaction: a.reaction, messageId: a.message_id, sender: a.sender };
         const state = reactState(recipient, send);
@@ -250,6 +262,8 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
       try {
+        const off = await switchedOff('mark_read', {});
+        if (off) return off;
         recipient = await deps.resolver.resolve(a.chat, { exact: true });
         const d = await gate(ctx, 'mark_read', recipient);
         if (d.kind === 'deny') return denied('mark_read', recipient, d, {});

@@ -12,13 +12,13 @@ const enabled = (over: Partial<Policy['writes']> = {}) => (p: Policy): Policy =>
 const sendArgv = async () => (await h.argv()).filter((r) => r.key === 'send text');
 
 describe('send_text', () => {
-  it('is denied while writes are disabled and nothing reaches wacli', async () => {
+  it('is denied while writes are disabled and nothing reaches wacli, not even a name lookup', async () => {
     h = await makeHarness();
     const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
     expect(r.isError).toBe(true);
     expect(errorOf(r)).toMatchObject({ error: 'writes_disabled', message: expect.stringContaining('policy enable') });
-    expect(await sendArgv()).toHaveLength(0);
-    expect(h.audits).toEqual([expect.objectContaining({ tool: 'send_text', outcome: 'denied', reason: 'writes_disabled', to_jid: '61400000001@s.whatsapp.net', text: 'hello' })]);
+    expect(await h.argv()).toEqual([]);
+    expect(h.audits).toEqual([expect.objectContaining({ tool: 'send_text', outcome: 'denied', reason: 'writes_disabled', to_jid: null, to_name: null, kind: null, text: 'hello' })]);
   });
 
   it('asks the person to confirm, then sends once and audits it', async () => {
@@ -296,5 +296,29 @@ describe('names are matched exactly for writes', () => {
       expect(errorOf(await h.call('send_text', { to: 'Dave', message: 'hello' })).error).toBe('ambiguous_recipient');
       expect(h.elicitations).toHaveLength(0);
     });
+  });
+});
+
+describe('the master switch comes before the recipient lookup', () => {
+  const calls: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+    ['send_text', { to: 'a', message: 'hello' }, { text: 'hello' }],
+    ['send_file', { to: 'a', path: '/tmp/none.pdf' }, { file: '/tmp/none.pdf' }],
+    ['react', { chat: 'a', message_id: 'MSG1', reaction: '👍' }, { reaction: '👍', message_id: 'MSG1' }],
+    ['mark_read', { chat: 'a' }, {}],
+  ];
+
+  it.each(calls)('%s gives writes_disabled for an ambiguous name, spawns nothing and audits a denial', async (tool, args, audited) => {
+    h = await makeHarness();
+    const r = await h.call(tool, args);
+    expect(r.isError).toBe(true);
+    expect(errorOf(r)).toMatchObject({ error: 'writes_disabled', message: expect.stringContaining('policy enable') });
+    expect(await h.argv()).toEqual([]);
+    expect(h.audits).toEqual([expect.objectContaining({ tool, outcome: 'denied', reason: 'writes_disabled', to_jid: null, ...audited })]);
+  });
+
+  it('still looks the name up once writes are on', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    expect(errorOf(await h.call('send_text', { to: 'a', message: 'hello' })).error).toBe('ambiguous_recipient');
+    expect((await h.argv()).map((x) => x.key)).toEqual(['chats list']);
   });
 });
