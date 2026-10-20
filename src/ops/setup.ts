@@ -154,7 +154,7 @@ export async function runSetup(o: SetupOptions): Promise<boolean> {
   }
 
   io.print('');
-  io.print(mcpConfigHelp());
+  io.print(mcpConfigHelp(o.paths));
   io.print('');
   io.print(BAN_NOTICE);
   io.print('');

@@ -80,18 +80,26 @@ export function launchdPlist(p: ServicePaths): string {
   ].join('\n');
 }
 
+/** systemd.syntax quoting: a double-quoted string, with backslash and quote escaped and % doubled because specifiers are expanded inside quotes too. */
+function systemdQuote(s: string): string {
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+}
+
+/** ExecStart words are also searched for $VAR, so a literal dollar is written $$. Environment= values are not (systemd.exec: "$" has no special meaning there), so a dollar stays as it is. */
+const systemdExecWord = (s: string): string => systemdQuote(s.replace(/\$/g, () => '$$'));
+
 export function systemdUnit(p: ServicePaths): string {
-  const log = path.join(p.dataDir, 'daemon.log');
-  const envLines = Object.entries({ WHATSAPP_AGENT_WACLI_BIN: p.wacliBin, ...p.env }).map(([k, v]) => `Environment=${k}=${v}`).join('\n');
+  const log = path.join(p.dataDir, 'daemon.log').replace(/%/g, '%%');
+  const envLines = Object.entries({ WHATSAPP_AGENT_WACLI_BIN: p.wacliBin, ...p.env }).map(([k, v]) => `Environment=${systemdQuote(`${k}=${v}`)}`).join('\n');
   return [
     '[Unit]',
     'Description=whatsapp-agent sync daemon',
-    'After=network-online.target',
     '',
     '[Service]',
-    `ExecStart=${p.nodePath} ${p.cliPath} daemon run`,
+    `ExecStart=${[p.nodePath, p.cliPath, 'daemon', 'run'].map(systemdExecWord).join(' ')}`,
     'Restart=on-failure',
     'RestartSec=5',
+    'KillMode=mixed',
     envLines,
     `StandardOutput=append:${log}`,
     `StandardError=append:${log}`,
@@ -110,8 +118,11 @@ async function resolveWacliBin(p: ServicePaths, exec: ExecFn): Promise<ServicePa
   return { ...p, wacliBin: found };
 }
 
-export function createServiceManager(opts: { platform: Platform; paths: ServicePaths; exec: ExecFn; fs: ServiceFs }): ServiceManager | null {
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+export function createServiceManager(opts: { platform: Platform; paths: ServicePaths; exec: ExecFn; fs: ServiceFs; sleep?: (ms: number) => Promise<void> }): ServiceManager | null {
   const { platform, exec, fs } = opts;
+  const sleep = opts.sleep ?? defaultSleep;
   const notInstalled: ServiceStatus = { installed: false, running: null, detail: 'not installed' };
 
   if (platform === 'darwin') {
@@ -122,7 +133,12 @@ export function createServiceManager(opts: { platform: Platform; paths: ServiceP
         const p = await resolveWacliBin(opts.paths, exec);
         await fs.writeFile(file, launchdPlist(p));
         await exec('launchctl', ['bootout', target]);
-        const r = await exec('launchctl', ['bootstrap', `gui/${p.uid}`, file]);
+        let r = await exec('launchctl', ['bootstrap', `gui/${p.uid}`, file]);
+        if (r.code !== 0) {
+          // bootout returns before the old job is gone, so the first bootstrap can fail; try once more.
+          await sleep(500);
+          r = await exec('launchctl', ['bootstrap', `gui/${p.uid}`, file]);
+        }
         if (r.code !== 0) throw new AgentError('wacli_error', `launchctl bootstrap failed (${r.code}): ${r.stdout.trim()}`);
         return file;
       },
@@ -149,6 +165,9 @@ export function createServiceManager(opts: { platform: Platform; paths: ServiceP
         await exec('systemctl', ['--user', 'daemon-reload']);
         const r = await exec('systemctl', ['--user', 'enable', '--now', SYSTEMD_UNIT]);
         if (r.code !== 0) throw new AgentError('wacli_error', `systemctl enable failed (${r.code}): ${r.stdout.trim()}`);
+        // enable --now leaves an already active unit running, so restart it to pick up the new unit file.
+        const restarted = await exec('systemctl', ['--user', 'restart', SYSTEMD_UNIT]);
+        if (restarted.code !== 0) throw new AgentError('wacli_error', `systemctl restart failed (${restarted.code}): ${restarted.stdout.trim()}`);
         return file;
       },
       async uninstall() {
@@ -189,14 +208,15 @@ export const realFs: ServiceFs = {
 };
 
 export function servicePathsForThisMachine(paths: Paths, env: NodeJS.ProcessEnv = process.env): ServicePaths {
-  /** Always pinned: a login service does not inherit the installer's shell (XDG variables included). */
-  const extra: Record<string, string> = { WHATSAPP_AGENT_CONFIG_DIR: paths.configDir, WHATSAPP_AGENT_DATA_DIR: paths.dataDir };
+  /** Always pinned, and absolute: a login service does not inherit the installer's shell (XDG variables included) or its working directory. */
+  const extra: Record<string, string> = { WHATSAPP_AGENT_CONFIG_DIR: path.resolve(paths.configDir), WHATSAPP_AGENT_DATA_DIR: path.resolve(paths.dataDir) };
+  if (env.WACLI_STORE_DIR) extra.WACLI_STORE_DIR = path.resolve(env.WACLI_STORE_DIR);
   return {
     nodePath: process.execPath,
     cliPath: fileURLToPath(new URL('../cli.js', import.meta.url)),
     wacliBin: env.WHATSAPP_AGENT_WACLI_BIN || 'wacli',
-    dataDir: paths.dataDir,
-    configDir: paths.configDir,
+    dataDir: path.resolve(paths.dataDir),
+    configDir: path.resolve(paths.configDir),
     home: os.homedir(),
     uid: typeof process.getuid === 'function' ? process.getuid() : 0,
     env: extra,

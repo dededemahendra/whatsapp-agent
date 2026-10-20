@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { formatAudit, parseLimit, parseSince } from '../../src/ops/audit-cmd.js';
-import { claudeMcpAddCommand, mcpConfigJson } from '../../src/ops/mcp-config.js';
+import { claudeMcpAddCommand, mcpConfigHelp, mcpConfigJson } from '../../src/ops/mcp-config.js';
+import { resolvePaths } from '../../src/paths.js';
 
 describe('audit formatting', () => {
   it('prints one line per record with outcome, tool, recipient and reason', () => {
@@ -27,8 +28,37 @@ describe('audit option parsing', () => {
 });
 
 describe('mcp config snippets', () => {
+  const home = '/home/u';
+  const plainCommand = 'claude mcp add --scope user whatsapp -- npx -y whatsapp-agent mcp';
+  const plainJson = { mcpServers: { whatsapp: { command: 'npx', args: ['-y', 'whatsapp-agent', 'mcp'] } } };
+
   it('produce the Claude Code command and a JSON block', () => {
-    expect(claudeMcpAddCommand()).toBe('claude mcp add --scope user whatsapp -- npx -y whatsapp-agent mcp');
-    expect(JSON.parse(mcpConfigJson())).toEqual({ mcpServers: { whatsapp: { command: 'npx', args: ['-y', 'whatsapp-agent', 'mcp'] } } });
+    expect(claudeMcpAddCommand()).toBe(plainCommand);
+    expect(JSON.parse(mcpConfigJson())).toEqual(plainJson);
+  });
+
+  it('leave the directory variables out when the resolved dirs are the defaults', () => {
+    const paths = resolvePaths({}, home);
+    expect(claudeMcpAddCommand(paths, home)).toBe(plainCommand);
+    expect(JSON.parse(mcpConfigJson(paths, home))).toEqual(plainJson);
+    expect(mcpConfigHelp(paths, home)).not.toContain('WHATSAPP_AGENT_');
+  });
+
+  it('include both variables when both dirs differ from the defaults, quoting a value with a space', () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: '/etc/wa cfg', WHATSAPP_AGENT_DATA_DIR: '/srv/wa' }, home);
+    expect(claudeMcpAddCommand(paths, home)).toBe(
+      "claude mcp add --scope user --env WHATSAPP_AGENT_CONFIG_DIR='/etc/wa cfg' --env WHATSAPP_AGENT_DATA_DIR=/srv/wa whatsapp -- npx -y whatsapp-agent mcp",
+    );
+    expect(JSON.parse(mcpConfigJson(paths, home))).toEqual({
+      mcpServers: { whatsapp: { ...plainJson.mcpServers.whatsapp, env: { WHATSAPP_AGENT_CONFIG_DIR: '/etc/wa cfg', WHATSAPP_AGENT_DATA_DIR: '/srv/wa' } } },
+    });
+    expect(mcpConfigHelp(paths, home)).toContain('--env WHATSAPP_AGENT_DATA_DIR=/srv/wa');
+  });
+
+  it('include only the variable whose dir differs, and treat XDG-derived dirs as non-default', () => {
+    const dataOnly = resolvePaths({ WHATSAPP_AGENT_DATA_DIR: '/srv/wa' }, home);
+    expect(claudeMcpAddCommand(dataOnly, home)).toBe('claude mcp add --scope user --env WHATSAPP_AGENT_DATA_DIR=/srv/wa whatsapp -- npx -y whatsapp-agent mcp');
+    const xdg = resolvePaths({ XDG_CONFIG_HOME: '/mnt/cfg' }, home);
+    expect(JSON.parse(mcpConfigJson(xdg, home)).mcpServers.whatsapp.env).toEqual({ WHATSAPP_AGENT_CONFIG_DIR: '/mnt/cfg/whatsapp-agent' });
   });
 });
