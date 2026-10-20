@@ -4905,7 +4905,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```ts
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildSyncArgs, parseEventLine, startSupervisor } from '../../src/ops/daemon.js';
+import { buildSyncArgs, describeStderrLine, parseEventLine, startSupervisor } from '../../src/ops/daemon.js';
 import { DEFAULT_POLICY } from '../../src/policy/schema.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, removeTmp } from '../helpers/fake.js';
 
@@ -4933,7 +4933,7 @@ describe('parseEventLine', () => {
 });
 
 describe('startSupervisor', () => {
-  function start(script: string, over: { sleeps?: number[] } = {}) {
+  function start(script: string, over: { sleeps?: number[]; sleep?: (ms: number) => Promise<void> } = {}) {
     const lines: string[] = [];
     const sleeps: number[] = over.sleeps ?? [];
     const handle = startSupervisor({
@@ -4943,7 +4943,7 @@ describe('startSupervisor', () => {
       env: fakeEnv({ FAKE_WACLI_SYNC: script, FAKE_WACLI_SYNC_COUNTER: path.join(tmp, 'counter') }),
       log: (l) => lines.push(l),
       backoff: { initialMs: 50, maxMs: 200, resetAfterMs: 60_000 },
-      sleep: async (ms) => { sleeps.push(ms); },
+      sleep: over.sleep ?? (async (ms) => { sleeps.push(ms); }),
     });
     return { handle, lines, sleeps };
   }
@@ -4957,12 +4957,19 @@ describe('startSupervisor', () => {
   });
 
   it('crash restarts with backoff, doubling to the cap, then stop() ends it', async () => {
-    const { handle, sleeps, lines } = start('connected;crash|crash|crash|connected;sleep:30000');
-    await new Promise((r) => setTimeout(r, 2500));
-    expect(sleeps).toEqual([50, 100, 200]);
+    const { handle, sleeps, lines } = start('connected;crash|crash|crash|crash|connected;sleep:30000');
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(sleeps).toEqual([50, 100, 200, 200]);
     await handle.stop();
     await expect(handle.done).resolves.toBe('stopped');
     expect(lines.some((l) => l.includes('restarting in 50 ms'))).toBe(true);
+  });
+
+  it('stop() interrupts a backoff sleep', async () => {
+    const { handle } = start('crash', { sleep: () => new Promise(() => {}) });
+    await new Promise((r) => setTimeout(r, 400));
+    await handle.stop();
+    await expect(handle.done).resolves.toBe('stopped');
   });
 
   it('forwards non-JSON stderr lines to the log', async () => {
@@ -4971,6 +4978,17 @@ describe('startSupervisor', () => {
     await handle.stop();
     await handle.done;
     expect(lines.some((l) => l.endsWith('connected; history sync 12%'))).toBe(true);
+  });
+});
+
+describe('describeStderrLine', () => {
+  it('logs event names only, redacts other json, strips control characters and caps length', () => {
+    expect(describeStderrLine('{"event":"connected","data":{"Text":"secret"},"ts":1}')).toEqual({ text: 'event=connected', event: 'connected' });
+    expect(describeStderrLine('{"event":"bad\\nname","ts":1}')).toEqual({ text: 'event=(unrecognised name)', event: null });
+    expect(describeStderrLine('{"type":"message","Text":"secret"}').text).toBe('(unrecognised json line, 34 chars)');
+    expect(describeStderrLine('warn \u001b[31mred\u001b[0m').text).toBe('warn [31mred[0m');
+    expect(describeStderrLine('x'.repeat(600)).text).toBe(`${'x'.repeat(500)}... (600 chars)`);
+    expect(describeStderrLine('   ').text).toBeNull();
   });
 });
 ```
@@ -5015,6 +5033,26 @@ export function parseEventLine(line: string): { event: string; data?: unknown } 
   }
 }
 
+const EVENT_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+const MAX_PLAIN_LINE = 500;
+
+function safeLine(line: string): string {
+  const stripped = line.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e]/g, '');
+  return stripped.length > MAX_PLAIN_LINE ? `${stripped.slice(0, MAX_PLAIN_LINE)}... (${stripped.length} chars)` : stripped;
+}
+
+/** What one stderr line contributes to the log: never a message body, never an unbounded line. */
+export function describeStderrLine(line: string): { text: string | null; event: string | null } {
+  const ev = parseEventLine(line);
+  if (ev) {
+    return EVENT_NAME.test(ev.event) ? { text: `event=${ev.event}`, event: ev.event } : { text: 'event=(unrecognised name)', event: null };
+  }
+  const t = line.trim();
+  if (t === '') return { text: null, event: null };
+  if (t.startsWith('{')) return { text: `(unrecognised json line, ${line.length} chars)`, event: null };
+  return { text: safeLine(line), event: null };
+}
+
 export interface SupervisorOptions {
   bin: string;
   account: string | null;
@@ -5043,6 +5081,8 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
   let child: ChildProcess | null = null;
   let stopping = false;
   let delay = backoff.initialMs;
+  let requestStop: () => void = () => {};
+  const stopRequested = new Promise<void>((resolve) => { requestStop = resolve; });
 
   const runOnce = (): Promise<{ code: number | null; loggedOut: boolean; startedAt: number }> =>
     new Promise((resolve) => {
@@ -5052,13 +5092,9 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
       child = spawn(opts.bin, args, { env: { ...(opts.env ?? process.env), NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
       const rl = readline.createInterface({ input: child.stderr! });
       rl.on('line', (line) => {
-        const ev = parseEventLine(line);
-        if (ev) {
-          if (ev.event === 'logged_out') loggedOut = true;
-          opts.log(`${stamp()} event=${ev.event}`);
-        } else if (line.trim() !== '') {
-          opts.log(`${stamp()} ${line}`);
-        }
+        const d = describeStderrLine(line);
+        if (d.event === 'logged_out') loggedOut = true;
+        if (d.text !== null) opts.log(`${stamp()} ${d.text}`);
       });
       child.stdout?.on('data', () => { /* sync prints nothing useful on stdout */ });
       child.on('error', (err) => opts.log(`${stamp()} spawn error: ${err.message}`));
@@ -5075,7 +5111,7 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
       }
       if (now() - r.startedAt >= backoff.resetAfterMs) delay = backoff.initialMs;
       opts.log(`${stamp()} sync exited with code ${r.code ?? 'signal'}; restarting in ${delay} ms`);
-      await sleep(delay);
+      await Promise.race([sleep(delay), stopRequested]);
       delay = Math.min(delay * 2, backoff.maxMs);
       if (stopping) return 'stopped';
     }
@@ -5085,6 +5121,8 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
     done,
     async stop() {
       stopping = true;
+      requestStop();
+      opts.log(`${stamp()} stop requested`);
       const c = child;
       if (c && c.exitCode === null) {
         c.kill('SIGTERM');
@@ -5137,7 +5175,7 @@ program.addCommand(daemonCommand());
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/daemon.test.ts && pnpm typecheck`
-Expected: PASS (5 tests). The restart test waits 2.5 s.
+Expected: PASS (7 tests). The restart test waits 3 s.
 
 - [ ] **Step 5: Commit**
 
@@ -5204,13 +5242,15 @@ describe('templates', () => {
     expect(plist).toContain('<key>WHATSAPP_AGENT_WACLI_BIN</key><string>/opt/homebrew/bin/wacli</string>');
     expect(plist).toContain('<string>/a&amp;b</string>');
     expect(plist).toContain('<key>StandardOutPath</key><string>/home/u/.local/share/whatsapp-agent/daemon.log</string>');
+    expect(plist).toContain('<key>SuccessfulExit</key><false/>');
+    expect(plist).not.toContain('<key>KeepAlive</key><true/>');
     expect(launchdPlistPath('/home/u')).toBe('/home/u/Library/LaunchAgents/com.whatsapp-agent.daemon.plist');
   });
   it('renders a systemd unit', () => {
     const unit = systemdUnit(sp);
     expect(unit).toContain('ExecStart=/usr/local/bin/node /usr/local/lib/node_modules/whatsapp-agent/dist/cli.js daemon run');
     expect(unit).toContain('Environment=WHATSAPP_AGENT_WACLI_BIN=/opt/homebrew/bin/wacli');
-    expect(unit).toContain('Restart=always');
+    expect(unit).toContain('Restart=on-failure');
     expect(systemdUnitPath('/home/u')).toBe('/home/u/.config/systemd/user/whatsapp-agent.service');
   });
 });
@@ -5364,7 +5404,10 @@ export function launchdPlist(p: ServicePaths): string {
     '    <string>run</string>',
     '  </array>',
     '  <key>RunAtLoad</key><true/>',
-    '  <key>KeepAlive</key><true/>',
+    '  <key>KeepAlive</key>',
+    '  <dict>',
+    '    <key>SuccessfulExit</key><false/>',
+    '  </dict>',
     '  <key>ProcessType</key><string>Background</string>',
     `  <key>StandardOutPath</key><string>${xml(log)}</string>`,
     `  <key>StandardErrorPath</key><string>${xml(log)}</string>`,
@@ -5388,7 +5431,7 @@ export function systemdUnit(p: ServicePaths): string {
     '',
     '[Service]',
     `ExecStart=${p.nodePath} ${p.cliPath} daemon run`,
-    'Restart=always',
+    'Restart=on-failure',
     'RestartSec=5',
     envLines,
     `StandardOutput=append:${log}`,

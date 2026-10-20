@@ -685,3 +685,11 @@ overrides the earlier text where they differ.
   bytes match the declared type, and only when the size is above 0 and at or
   below `media.inlineImageMaxBytes`. The path and metadata are returned
   regardless.
+- A21. The daemon log renders wacli's stderr through `describeStderrLine`:
+  a recognised event logs only its validated name, any other JSON-shaped
+  line becomes a placeholder with a length, and plain lines lose control
+  characters and are capped at 500 characters. `daemon run` exits 0 both on
+  `logged_out` and on a stop; the launchd template uses `KeepAlive` with
+  `SuccessfulExit: false` and the systemd unit `Restart=on-failure`, so a
+  revoked session is not relaunched by the service layer while supervisor
+  crashes still are. A stop request interrupts a backoff sleep.
