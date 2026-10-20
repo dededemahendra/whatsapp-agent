@@ -8,6 +8,8 @@ import { makeTmp, removeTmp } from '../helpers/fake.js';
 const alice = { jid: '61400000001@s.whatsapp.net', name: 'Alice', kind: 'user' as const };
 const family = { jid: '120363000000000001@g.us', name: 'Family', kind: 'group' as const };
 const channel = { jid: '1@newsletter', name: 'News', kind: 'channel' as const };
+const broadcast = { jid: 'status@broadcast', name: null, kind: 'broadcast' as const };
+const unknown = { jid: 'x@weird', name: 'Odd', kind: 'unknown' as const };
 const calm = { countLastHour: 0, secondsSinceLast: null, secondsUntilWindowFrees: 0 };
 
 function policy(over: Partial<Policy['writes']> = {}): Policy {
@@ -18,12 +20,15 @@ function input(over: Partial<DecideInput> = {}): DecideInput {
 }
 
 describe('matchesAllow', () => {
-  it('matches by JID, formatted phone and case-insensitive name', () => {
+  it('matches by JID or phone number only, never by name', () => {
     expect(matchesAllow(['61400000001@s.whatsapp.net'], alice)).toBe(true);
     expect(matchesAllow(['+61 400 000 001'], alice)).toBe(true);
-    expect(matchesAllow(['alice'], alice)).toBe(true);
     expect(matchesAllow(['+61400000001@s.whatsapp.net'], alice)).toBe(true);
     expect(matchesAllow(['61400000001:7@s.whatsapp.net'], alice)).toBe(true);
+    expect(matchesAllow(['61400000001@S.WHATSAPP.NET'], alice)).toBe(true);
+    expect(matchesAllow(['61400000001@s.whatsapp.net'], { ...alice, jid: '61400000001:7@s.whatsapp.net' })).toBe(true);
+    expect(matchesAllow(['alice'], alice)).toBe(false);
+    expect(matchesAllow(['Alice'], alice)).toBe(false);
     expect(matchesAllow(['+61 400 000 002', 'Bob'], alice)).toBe(false);
     expect(matchesAllow([], alice)).toBe(false);
   });
@@ -38,8 +43,10 @@ describe('decide', () => {
     expect(decide(input({ tool: 'mark_read', policy: policy({ confirm: 'always' }) }))).toEqual({ kind: 'allow' });
     expect(decide(input({ tool: 'mark_read', recipient: family }))).toEqual({ kind: 'allow' });
   });
-  it('refuses channels', () => {
-    expect(decide(input({ recipient: channel, policy: policy({ confirm: 'never' }) }))).toMatchObject({ kind: 'deny', code: 'unsupported_target' });
+  it('refuses channels, broadcast lists and unknown kinds', () => {
+    for (const target of [channel, broadcast, unknown]) {
+      expect(decide(input({ recipient: target, policy: policy({ confirm: 'never' }) }))).toMatchObject({ kind: 'deny', code: 'unsupported_target' });
+    }
   });
   it('gates groups behind writes.groups', () => {
     expect(decide(input({ recipient: family, policy: policy({ confirm: 'never' }) }))).toMatchObject({ kind: 'deny', code: 'groups_disabled' });
@@ -63,8 +70,8 @@ describe('decide', () => {
     expect(decide(input({ answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
   });
   it('skips confirmation for allowlisted recipients in unlisted mode', () => {
-    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['Alice'] }) }))).toEqual({ kind: 'allow' });
-    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['Bob'] }) }))).toEqual({ kind: 'confirm' });
+    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 001'] }) }))).toEqual({ kind: 'allow' });
+    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 002'] }) }))).toEqual({ kind: 'confirm' });
   });
   it('denies when confirmation is needed but the client cannot show a form', () => {
     expect(decide(input({ clientCanConfirm: false }))).toMatchObject({ kind: 'deny', code: 'confirmation_unavailable' });

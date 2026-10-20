@@ -29,7 +29,7 @@ export type Decision =
 
 export const DENY_MESSAGES: Record<DenyCode, string> = {
   writes_disabled: 'Sending is turned off in the policy. The person can enable it with: whatsapp-agent policy enable',
-  unsupported_target: 'Channels are read-only in this version.',
+  unsupported_target: 'Only people and groups can receive messages. Channels, broadcast lists and unknown chat types are read-only in this version.',
   groups_disabled: 'Sending to groups is turned off. The person can enable it with: whatsapp-agent policy set groups on',
   file_outside_roots: 'That file is outside the allowed folders. The person can add a folder with: whatsapp-agent policy add-file-root <dir>',
   rate_limited: 'Send rate limit reached. Wait before sending again.',
@@ -41,14 +41,15 @@ export function jidUser(jid: string): string {
   return (jid.split('@')[0] ?? '').split(':')[0] ?? '';
 }
 
+/** Entries are phone numbers (compared by digits) or JIDs. Names never match: display names are chosen by other people. */
 export function matchesAllow(allow: string[], r: Resolved): boolean {
-  const user = jidUser(r.jid);
+  const jid = canonicalJid(r.jid).toLowerCase();
+  const user = jidUser(jid);
   for (const raw of allow) {
-    const e = raw.trim();
+    const e = raw.trim().toLowerCase();
     if (e === '') continue;
-    if (JID_RE.test(e) && canonicalJid(e).toLowerCase() === r.jid.toLowerCase()) return true;
+    if (JID_RE.test(e) && canonicalJid(e) === jid) return true;
     if (looksLikePhone(e) && digitsOf(e) === user) return true;
-    if (r.name && e.toLowerCase() === r.name.toLowerCase()) return true;
   }
   return false;
 }
@@ -64,7 +65,7 @@ export function decide(i: DecideInput): Decision {
   const w = i.policy.writes;
   if (!w.enabled) return deny('writes_disabled');
   if (i.tool === 'mark_read') return { kind: 'allow' };
-  if (i.recipient.kind === 'channel') return deny('unsupported_target');
+  if (i.recipient.kind !== 'user' && i.recipient.kind !== 'group') return deny('unsupported_target');
   if (i.recipient.kind === 'group' && !w.groups) return deny('groups_disabled');
   if (i.tool === 'send_file' && i.fileInsideRoots !== true) return deny('file_outside_roots');
 
