@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { Client } from '@modelcontextprotocol/client';
@@ -259,6 +259,35 @@ describe('whatsapp-agent mcp over stdio', () => {
           expect(m.method !== undefined || m.id !== undefined, line).toBe(true);
         }
         expect(cli.stderr()).toBe('');
+      } finally {
+        await removeTmp(dir);
+      }
+    });
+
+    it('logs a sent row that cannot be written, and still reports the send as sent', async () => {
+      const dir = await makeTmp('wa-auditlog-');
+      try {
+        const { env, log } = await writableEnv(dir, { sleepMs: 700 });
+        const cli = spawnCli({ ...env, WHATSAPP_AGENT_LOG: 'debug' });
+        await cli.initialize();
+        const call = cli.request('tools/call', { name: 'send_text', arguments: { to: ALICE, message: SECRET } });
+        // The fake writes its argv before it sleeps, so by now the attempted row is in the audit log and the send is under way.
+        await waitFor(async () => (await readArgvLog(log)).some((r) => r.key === 'send text'), { what: 'the write to reach wacli' });
+        const audit = path.join(dir, 'data', 'audit.jsonl');
+        await rm(audit);
+        await mkdir(audit); // a directory where the log was: the next append fails
+
+        const r = await within(call, 8000, 'the tool result');
+        expect(r.error).toBeUndefined();
+        expect(r.result).toMatchObject({ structuredContent: { sent: true, message_id: '3EB0SENT0001' } });
+        expect(r.result).not.toHaveProperty('isError', true);
+
+        cli.child.kill('SIGTERM');
+        expect((await within(cli.exited, 8000, 'the server to exit')).code).toBe(0);
+        const err = cli.stderr();
+        expect(err).toContain(`[whatsapp-agent] Could not write the audit log at ${audit}: `);
+        expect(err).toContain('EISDIR');
+        expect(err).not.toContain(SECRET);
       } finally {
         await removeTmp(dir);
       }

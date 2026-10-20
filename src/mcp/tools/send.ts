@@ -96,22 +96,18 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     client: server.server.getClientVersion()?.name,
   });
 
-  /** Rows for denials and failures: the result already says what happened, so a row that cannot be written changes nothing. */
+  /** The audit log's own failure, worded for whoever reads stderr. The reason is trimmed of trailing full stops so the sentence ends once. */
+  const unwritable = (e: unknown): string => `Could not write the audit log at ${deps.paths.auditFile}: ${(e instanceof Error ? e.message : String(e)).replace(/[\s.]+$/, '')}`;
+
+  /**
+   * Rows for denials, failures and the sent row: the result already says what happened, and a delivered send is reported as sent whatever
+   * becomes of its row, so a row that cannot be written is logged and nothing else changes. (The logger has one level, debug.)
+   */
   async function record(rec: AuditRecord): Promise<void> {
     try {
       await deps.audit(rec);
     } catch (e) {
-      debug('audit append failed', { tool: rec.tool, outcome: rec.outcome, error: e instanceof Error ? e.message : String(e) });
-    }
-  }
-
-  /** A row that has to be written, the attempted row before a send and the sent row after it. `ifLost` is added to the message when it cannot be. */
-  async function mustRecord(rec: AuditRecord, ifLost = ''): Promise<void> {
-    try {
-      await deps.audit(rec);
-    } catch (e) {
-      const why = (e instanceof Error ? e.message : String(e)).replace(/[\s.]+$/, '');
-      throw new AgentError('invalid_input', `Could not write the audit log at ${deps.paths.auditFile}: ${why}.${ifLost}`);
+      debug(unwritable(e), { tool: rec.tool, outcome: rec.outcome });
     }
   }
 
@@ -137,11 +133,16 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   }
 
   /**
-   * Writes the row that says a send is about to be handed to wacli. When it cannot be written the send does not happen, so nothing leaves
-   * unrecorded. It comes before the send, so it never hides one that happened.
+   * Writes the row that says a write is about to be handed to wacli. This one is required: when it cannot be written the write does not
+   * happen, so nothing leaves unrecorded. It comes before the write, so it never hides one that happened.
    */
-  const attempt = (tool: WriteTool, recipient: Resolved, extra: Partial<AuditRecord>): Promise<void> =>
-    mustRecord({ ...base(tool, recipient), outcome: 'attempted', ...extra }, ' Nothing was sent.');
+  async function attempt(tool: WriteTool, recipient: Resolved, extra: Partial<AuditRecord>): Promise<void> {
+    try {
+      await deps.audit({ ...base(tool, recipient), outcome: 'attempted', ...extra });
+    } catch (e) {
+      throw new AgentError('invalid_input', `${unwritable(e)}. Nothing was sent.`);
+    }
+  }
 
   /**
    * Hands the message to wacli. A failure the runner reports keeps the runner's own verdict: it marks the doubtful ones uncertain and gives
@@ -210,7 +211,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         if (a.link_preview === false) argv.push('--no-preview');
         await attempt('send_text', recipient, { text: a.message });
         const id = idOf(await write<Partial<WacliSendResult> | null>(progress, argv));
-        await mustRecord({ ...base('send_text', recipient), outcome: 'sent', ...(id ? { message_id: id } : {}), text: a.message });
+        await record({ ...base('send_text', recipient), outcome: 'sent', ...(id ? { message_id: id } : {}), text: a.message });
         return ok({ sent: true, message_id: id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
         return await failed(progress, 'send_text', recipient, e, { text: a.message });
@@ -260,7 +261,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const env: Record<string, string> = policy.writes.fileRoots.length > 0 ? { WACLI_MEDIA_ROOTS: policy.writes.fileRoots.join(path.delimiter) } : {};
         await attempt('send_file', recipient, { file: a.path, text: a.caption });
         const id = idOf(await write<Partial<WacliSendResult> | null>(progress, argv, { env }));
-        await mustRecord({ ...base('send_file', recipient), outcome: 'sent', ...(id ? { message_id: id } : {}), file: a.path, text: a.caption });
+        await record({ ...base('send_file', recipient), outcome: 'sent', ...(id ? { message_id: id } : {}), file: a.path, text: a.caption });
         return ok({ sent: true, message_id: id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
         return await failed(progress, 'send_file', recipient, e, { file: a.path });
@@ -302,7 +303,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         if (a.sender) argv.push(`--sender=${a.sender}`);
         await attempt('react', recipient, { reaction: a.reaction, message_id: a.message_id });
         const id = idOf(await write<Partial<WacliSendResult> | null>(progress, argv));
-        await mustRecord({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
+        await record({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
         return ok({ sent: true, message_id: id, to: recipient });
       } catch (e) {
         return await failed(progress, 'react', recipient, e, { reaction: a.reaction, message_id: a.message_id });
@@ -334,7 +335,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         release = hold();
         await attempt('mark_read', recipient, {});
         await deps.runner.write<WacliChatStateResult>(['chats', 'mark-read', `--chat=${recipient.jid}`], { idempotent: true });
-        await mustRecord({ ...base('mark_read', recipient), outcome: 'sent' });
+        await record({ ...base('mark_read', recipient), outcome: 'sent' });
         return ok({ ok: true, chat: recipient });
       } catch (e) {
         return await failed(progress, 'mark_read', recipient, e, {});
