@@ -4,6 +4,7 @@ import { auditCommand } from './ops/audit-cmd.js';
 import { daemonCommand } from './ops/daemon-cmd.js';
 import { doctorCommand } from './ops/doctor-cmd.js';
 import { policyCommand } from './ops/policy-cmd.js';
+import { setupCommand } from './ops/setup-cmd.js';
 import { PKG_VERSION } from './version.js';
 
 export const program = new Command()
@@ -22,8 +23,7 @@ program.addCommand(doctorCommand());
 program.addCommand(policyCommand());
 program.addCommand(auditCommand());
 program.addCommand(daemonCommand());
-
-// Later tasks append: setupCommand()
+program.addCommand(setupCommand());
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
