@@ -3614,6 +3614,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - `interface HandlerCtx { mcpReq: { envelope?: unknown; inputResponses?: Record<string, unknown> } }`
   - `elicitationSupportsForm(caps: unknown): boolean`, `clientCanConfirm(server: McpServer, ctx: HandlerCtx): boolean`, `readAnswer(ctx: HandlerCtx): Answer`, `confirmationRequired(message: string): InputRequiredResult`, `ConfirmSchema`
   - Tools `send_text`, `send_file`, `react`, `mark_read`.
+- Concurrency rulings: the gate (policy load, rate snapshot, decide, and the rate record when allowed) runs inside one process-wide serialised section so two concurrent sends cannot both pass the window check; the process holds exactly one rate limiter instance (`ServerDeps.rateLimiter`).
 
 - [ ] **Step 1: Write the failing unit test for the capability rule**
 
@@ -3749,6 +3750,15 @@ describe('send_text', () => {
     expect((await h.call('send_text', { to: 'Alice', message: 'two' })).isError).toBeFalsy();
     const third = await h.call('send_text', { to: 'Alice', message: 'three' });
     expect(errorOf(third)).toMatchObject({ error: 'rate_limited', retry_after_seconds: 3600 });
+    expect(await sendArgv()).toHaveLength(2);
+  });
+
+  it('serialises concurrent sends so the hourly window cannot be exceeded', async () => {
+    const now = new Date('2026-10-20T10:00:00Z');
+    h = await makeHarness({ policy: enabled({ confirm: 'never', rateLimit: { perHour: 2, minGapSeconds: 0 } }), now });
+    const results = await Promise.all(['a', 'b', 'c', 'd'].map((m) => h.call('send_text', { to: 'Alice', message: m })));
+    expect(results.filter((r) => !r.isError)).toHaveLength(2);
+    expect(results.filter((r) => r.isError && errorOf(r).error === 'rate_limited')).toHaveLength(2);
     expect(await sendArgv()).toHaveLength(2);
   });
 
@@ -3892,6 +3902,14 @@ const POLICY_NOTE = "Subject to the person's policy: may be disabled, may requir
 
 type Deny = Extract<Decision, { kind: 'deny' }>;
 
+/** Write gates run one at a time per process, so two concurrent sends cannot both pass the rate-limit check. */
+let writeChain: Promise<unknown> = Promise.resolve();
+function serialised<T>(fn: () => Promise<T>): Promise<T> {
+  const next = writeChain.then(fn, fn);
+  writeChain = next.catch(() => undefined);
+  return next;
+}
+
 export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   const { limits } = deps.startupPolicy;
   const label = (r: Resolved) => (r.name ? `${r.name} (${r.jid})` : r.jid);
@@ -3900,10 +3918,15 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     client: server.server.getClientVersion()?.name,
   });
 
+  /** Decides, and when the decision is allow, records the send inside the same serialised section. mark_read is not rate limited. */
   async function gate(ctx: HandlerCtx, tool: WriteTool, recipient: Resolved, extra: { fileInsideRoots?: boolean } = {}): Promise<Decision> {
-    const policy = await deps.loadPolicy();
-    const rate = await deps.rateLimiter.snapshot(deps.now());
-    return decide({ policy, tool, recipient, ...extra, rate, clientCanConfirm: clientCanConfirm(server, ctx), answer: readAnswer(ctx) });
+    return serialised(async () => {
+      const policy = await deps.loadPolicy();
+      const rate = await deps.rateLimiter.snapshot(deps.now());
+      const decision = decide({ policy, tool, recipient, ...extra, rate, clientCanConfirm: clientCanConfirm(server, ctx), answer: readAnswer(ctx) });
+      if (decision.kind === 'allow' && tool !== 'mark_read') await deps.rateLimiter.record(deps.now());
+      return decision;
+    });
   }
 
   async function denied(tool: WriteTool, recipient: Resolved, d: Deny, extra: Partial<AuditRecord>): Promise<CallToolResult> {
@@ -3939,7 +3962,6 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const d = await gate(ctx, 'send_text', recipient);
         if (d.kind === 'deny') return denied('send_text', recipient, d, { text: a.message });
         if (d.kind === 'confirm') return confirmationRequired(`Send to ${label(recipient)}?\n\n${a.message}`);
-        await deps.rateLimiter.record(deps.now());
         const argv = ['send', 'text', `--to=${recipient.jid}`, `--message=${a.message}`];
         if (a.reply_to) argv.push(`--reply-to=${a.reply_to}`);
         if (a.reply_to_sender) argv.push(`--reply-to-sender=${a.reply_to_sender}`);
@@ -3981,7 +4003,6 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
           const size = await stat(a.path).then((s) => `${s.size} bytes`).catch(() => 'unknown size');
           return confirmationRequired(`Send file to ${label(recipient)}?\n\n${a.path} (${size})${a.caption ? `\n${a.caption}` : ''}`);
         }
-        await deps.rateLimiter.record(deps.now());
         const argv = ['send', 'file', `--to=${recipient.jid}`, `--file=${a.path}`];
         if (a.caption) argv.push(`--caption=${a.caption}`);
         if (a.as && a.as !== 'auto') argv.push(`--as=${a.as}`);
@@ -4017,7 +4038,6 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const d = await gate(ctx, 'react', recipient);
         if (d.kind === 'deny') return denied('react', recipient, d, { reaction: a.reaction, message_id: a.message_id });
         if (d.kind === 'confirm') return confirmationRequired(`React with ${a.reaction || '(clear reaction)'} to message ${a.message_id} in ${label(recipient)}?`);
-        await deps.rateLimiter.record(deps.now());
         const argv = ['send', 'react', `--to=${recipient.jid}`, `--id=${a.message_id}`, `--reaction=${a.reaction}`];
         if (a.sender) argv.push(`--sender=${a.sender}`);
         const res = await deps.runner.write<WacliSendResult>(argv);
@@ -4066,7 +4086,7 @@ import { registerWriteTools } from './tools/send.js';
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/confirm.test.ts test/integration/write-tools.test.ts && pnpm typecheck`
-Expected: PASS (3 unit, 15 integration). If `server.server.getClientVersion` is reported as missing, replace the `client:` line in `base` with `client: undefined`; it is informational only. If `tools/list` fails with a schema conversion error mentioning `refine`, remove the two `.refine(...)` calls (`send_file.path`, `react.reaction`) and perform the same checks at the top of each handler, returning `toToolError(new AgentError('invalid_input', ...))`.
+Expected: PASS (3 unit, 16 integration). If `server.server.getClientVersion` is reported as missing, replace the `client:` line in `base` with `client: undefined`; it is informational only. If `tools/list` fails with a schema conversion error mentioning `refine`, remove the two `.refine(...)` calls (`send_file.path`, `react.reaction`) and perform the same checks at the top of each handler, returning `toToolError(new AgentError('invalid_input', ...))`.
 
 - [ ] **Step 7: Run the whole suite and commit**
 
