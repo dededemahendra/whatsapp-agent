@@ -4,6 +4,12 @@ import * as z from 'zod/v4';
 import { AgentError } from '../errors.js';
 import { ensurePrivateDir } from '../paths.js';
 
+/** How long wacli lets the connection go quiet before it reconnects, kept short so a dead link is noticed: up to 120 seconds, or exactly 1m or 2m. */
+function isStaleThreshold(value: string): boolean {
+  if (/^[12]m$/.test(value)) return true;
+  return /^\d+s$/.test(value) && Number(value.slice(0, -1)) <= 120;
+}
+
 export const PolicySchema = z.strictObject({
   version: z.literal(1),
   account: z.string().min(1).nullable(),
@@ -29,7 +35,7 @@ export const PolicySchema = z.strictObject({
   daemon: z.strictObject({
     presenceMode: z.enum(['quiet', 'normal']),
     sendSpacing: z.string().regex(/^\d+(ms|s|m)(-\d+(ms|s|m))?$/),
-    staleThreshold: z.string().regex(/^\d+(s|m)$/),
+    staleThreshold: z.string().refine(isStaleThreshold, 'must be at most 2 minutes: a number of seconds up to 120 (for example 90s), or 1m or 2m'),
     maxDbSize: z.string().regex(/^\d+(MB|GB)$/),
     downloadMedia: z.boolean(),
   }),

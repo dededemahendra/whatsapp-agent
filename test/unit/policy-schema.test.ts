@@ -102,4 +102,41 @@ describe('policy schema', () => {
     const err = (await savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: [''] } }).catch((e: unknown) => e)) as Error;
     expect(err.message).not.toContain('doctor');
   });
+
+  describe('daemon.staleThreshold', () => {
+    const withThreshold = (staleThreshold: string) => ({ ...DEFAULT_POLICY, daemon: { ...DEFAULT_POLICY.daemon, staleThreshold } });
+    const LIMIT = /daemon\.staleThreshold: .*at most 2 minutes.*120.*1m.*2m/;
+
+    it.each(['2m', '1m', '120s', '119s', '90s', '30s', '5s', '1s', '0s', '007s'])('accepts %s', (value) => {
+      expect(PolicySchema.safeParse(withThreshold(value)).success).toBe(true);
+    });
+
+    it.each(['121s', '200s', '99999999999999999999s', '3m', '5m', '10m', '0m', '01m', '3', '1h', '2h', '1.5m', '-5s', '+5s', '', 's', 'm', ' 2m', '2m ', '2 m', '2M', '120S', '1m30s'])('refuses %j and names the limit', (value) => {
+      const result = PolicySchema.safeParse(withThreshold(value));
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        const message = result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
+        expect(message).toMatch(LIMIT);
+      }
+    });
+
+    it('is reported by loadPolicy with the file, the field and the limit', async () => {
+      const file = path.join(tmp, 'policy.json');
+      await writeFile(file, JSON.stringify(withThreshold('10m')));
+      const err = (await loadPolicy(file).catch((e: unknown) => e)) as Error;
+      expect(err.message).toContain(file);
+      expect(err.message).toMatch(LIMIT);
+    });
+
+    it('is refused by savePolicy before anything is written', async () => {
+      const file = path.join(tmp, 'cfg', 'policy.json');
+      await expect(savePolicy(file, withThreshold('3m'))).rejects.toMatchObject({ code: 'invalid_input', message: expect.stringMatching(LIMIT) });
+      await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('keeps the default inside the limit', () => {
+      expect(PolicySchema.safeParse(DEFAULT_POLICY).success).toBe(true);
+      expect(DEFAULT_POLICY.daemon.staleThreshold).toBe('2m');
+    });
+  });
 });
