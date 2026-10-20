@@ -3669,10 +3669,11 @@ describe('elicitationSupportsForm', () => {
 `test/integration/write-tools.test.ts`:
 
 ```ts
-import { mkdir, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Policy } from '../../src/policy/schema.js';
+import { makeTmp, removeTmp } from '../helpers/fake.js';
 import { errorOf, makeHarness, type Harness } from '../helpers/harness.js';
 
 let h: Harness;
@@ -3790,7 +3791,7 @@ describe('send_text', () => {
     expect(errorOf(await h.call('send_text', { to: 'a', message: 'x' })).error).toBe('ambiguous_recipient');
     expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'ambiguous_recipient', to_jid: null });
     await h.close();
-    h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|usync timeout' } });
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|usync failed' } });
     expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'x' })).error).toBe('wacli_error');
     expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'wacli_error' });
   });
@@ -3798,21 +3799,24 @@ describe('send_text', () => {
 
 describe('send_file', () => {
   it('refuses without file roots, then sends with WACLI_MEDIA_ROOTS set', async () => {
-    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
-    const dir = path.join(h.tmp, 'outbox');
-    await mkdir(dir);
-    const file = path.join(dir, 'report.pdf');
-    await writeFile(file, 'pdf');
-    expect(errorOf(await h.call('send_file', { to: 'Alice', path: file })).error).toBe('file_outside_roots');
-    await h.close();
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      const file = path.join(outbox, 'report.pdf');
+      await writeFile(file, 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+      expect(errorOf(await h.call('send_file', { to: 'Alice', path: file })).error).toBe('file_outside_roots');
+      await h.close();
 
-    h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [dir] }) });
-    const r = await h.call('send_file', { to: 'Alice', path: file, caption: 'the report', as: 'document' });
-    expect(r.isError).toBeFalsy();
-    const [send] = (await h.argv()).filter((x) => x.key === 'send file');
-    expect(send!.argv.slice(3)).toEqual(['send', 'file', '--to=61400000001@s.whatsapp.net', `--file=${file}`, '--caption=the report', '--as=document']);
-    expect(send!.env.WACLI_MEDIA_ROOTS).toBe(dir);
-    expect(h.audits.at(-1)).toMatchObject({ tool: 'send_file', outcome: 'sent', file });
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox] }) });
+      const r = await h.call('send_file', { to: 'Alice', path: file, caption: 'the report', as: 'document' });
+      expect(r.isError).toBeFalsy();
+      const [send] = (await h.argv()).filter((x) => x.key === 'send file');
+      expect(send!.argv.slice(3)).toEqual(['send', 'file', '--to=61400000001@s.whatsapp.net', `--file=${file}`, '--caption=the report', '--as=document']);
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(outbox);
+      expect(h.audits.at(-1)).toMatchObject({ tool: 'send_file', outcome: 'sent', file });
+    } finally {
+      await removeTmp(outbox);
+    }
   });
 
   it('rejects a relative path', async () => {
@@ -4030,7 +4034,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         if (a.caption) argv.push(`--caption=${a.caption}`);
         if (a.as && a.as !== 'auto') argv.push(`--as=${a.as}`);
         if (a.filename) argv.push(`--filename=${a.filename}`);
-        const env = policy.writes.fileRoots.length > 0 ? { WACLI_MEDIA_ROOTS: policy.writes.fileRoots.join(path.delimiter) } : {};
+        const env: Record<string, string> = policy.writes.fileRoots.length > 0 ? { WACLI_MEDIA_ROOTS: policy.writes.fileRoots.join(path.delimiter) } : {};
         const res = await deps.runner.write<WacliSendResult>(argv, { env });
         await deps.audit({ ...base('send_file', recipient), outcome: 'sent', message_id: res.id, file: a.path, text: a.caption });
         return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
