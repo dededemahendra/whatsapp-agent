@@ -2631,7 +2631,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - `ok(structured): CallToolResult`, `effectiveLimit(requested: number | undefined, fallback: number, maxResults: number): number`
   - zod fragments: `ChatKindSchema`, `ResolvedSchema`, `ChatSchema`, `MessageSchema`, `PageSchema`, `ContactSchema`, `GroupSchema`, `ParticipantSchema`, `SendResultSchema`, `dateInput`, `messageIdInput`, `limitInput`
   - `interface PolicySummary { writes_enabled: boolean; confirm: ConfirmMode; allow_count: number; groups_enabled: boolean; file_roots_count: number; account: string | null }`, `summarizePolicy(p: Policy): PolicySummary`
-  - `interface StatusInfo { wacli_version: string | null; min_version_ok: boolean; authenticated: boolean; phone: string | null; connection_state: string | null; session_revoked: boolean; store_dir: string | null; last_sync_at: string | null; heartbeat_at: string | null; heartbeat_age_seconds: number | null; counts: { chats: number | null; messages: number | null } }`, `getStatus(runner: Runner, now: Date): Promise<StatusInfo>`, `readHeartbeat(file: string): Promise<Date | null>`
+  - `interface StatusInfo { wacli_version: string | null; min_version_ok: boolean; authenticated: boolean; phone: string | null; connection_state: string | null; session_revoked: boolean; store_dir: string | null; last_sync_at: string | null; heartbeat_at: string | null; heartbeat_age_seconds: number | null; counts: { chats: number | null; messages: number | null } }`, `getStatus(runner: Runner, now: Date): Promise<StatusInfo>`, `cachedVersion(runner: Runner): Promise<string | null>` (one `wacli version` per runner, cached), `readHeartbeat(file: string): Promise<Date | null>`
   - Test harness: `makeHarness(opts?: HarnessOptions): Promise<Harness>` with `Harness = { client; deps; tmp; audits: AuditRecord[]; elicitations: string[]; argv(): Promise<ArgvRecord[]>; call(name, args?): Promise<ToolResult>; close(): Promise<void> }` and `HarnessOptions = { policy?: (p: Policy) => Policy; env?: Record<string, string>; elicitation?: 'form' | 'none' | 'url-only'; elicit?: (message: string) => { action: 'accept' | 'decline' | 'cancel'; content?: Record<string, unknown> }; now?: Date }`, `ToolResult = { isError?: boolean; structuredContent?: unknown; content: Array<{ type: string; text?: string; mimeType?: string; data?: string }> }`.
 - Tool names registered here: `whatsapp_status`, `list_chats`, `find_contacts`, `list_groups`, `get_group`.
 
@@ -2753,6 +2753,18 @@ import { meetsMinimum } from '../version.js';
 import type { Runner } from './runner.js';
 import { phoneFromJid, toIso, type WacliDoctor } from './shape.js';
 
+/** wacli's version is read once per runner (so once per process) and cached. */
+const versionCache = new WeakMap<Runner, Promise<string | null>>();
+
+export function cachedVersion(runner: Runner): Promise<string | null> {
+  let pending = versionCache.get(runner);
+  if (!pending) {
+    pending = runner.version();
+    versionCache.set(runner, pending);
+  }
+  return pending;
+}
+
 export interface StatusInfo {
   wacli_version: string | null;
   min_version_ok: boolean;
@@ -2777,7 +2789,7 @@ export async function readHeartbeat(file: string): Promise<Date | null> {
 }
 
 export async function getStatus(runner: Runner, now: Date): Promise<StatusInfo> {
-  const version = await runner.version();
+  const version = await cachedVersion(runner);
   let doctor: WacliDoctor | null = null;
   let doctorError: AgentError | null = null;
   try {
@@ -3111,7 +3123,7 @@ export function registerStatusTool(server: McpServer, deps: ServerDeps): void {
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { toToolError } from '../../errors.js';
-import { toChat, type WacliChat } from '../../wacli/shape.js';
+import { asList, toChat, type WacliChat } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { effectiveLimit, ok } from '../result.js';
 import { ChatSchema, limitInput } from '../schemas.js';
@@ -3139,7 +3151,7 @@ export function registerChatTools(server: McpServer, deps: ServerDeps): void {
         if (query) args.push(`--query=${query}`);
         if (unread_only) args.push('--unread');
         if (!include_archived) args.push('--no-archived');
-        const rows = await deps.runner.read<WacliChat[]>(args);
+        const rows = asList(await deps.runner.read<WacliChat[] | null>(args));
         const now = deps.now();
         return ok({ chats: rows.slice(0, n).map((r) => toChat(r, now)) });
       } catch (e) {
@@ -3156,7 +3168,7 @@ export function registerChatTools(server: McpServer, deps: ServerDeps): void {
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { toToolError } from '../../errors.js';
-import { toContact, type WacliContact } from '../../wacli/shape.js';
+import { asList, toContact, type WacliContact } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { effectiveLimit, ok } from '../result.js';
 import { ContactSchema, limitInput } from '../schemas.js';
@@ -3178,7 +3190,7 @@ export function registerContactTools(server: McpServer, deps: ServerDeps): void 
     async ({ query, limit }) => {
       try {
         const n = effectiveLimit(limit, 20, limits.maxResults);
-        const rows = await deps.runner.read<WacliContact[]>(['contacts', 'search', `--limit=${n}`, '--', query]);
+        const rows = asList(await deps.runner.read<WacliContact[] | null>(['contacts', 'search', `--limit=${n}`, '--', query]));
         return ok({ contacts: rows.slice(0, n).map(toContact) });
       } catch (e) {
         return toToolError(e);
@@ -3194,7 +3206,7 @@ export function registerContactTools(server: McpServer, deps: ServerDeps): void 
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { AgentError, toToolError } from '../../errors.js';
-import { toGroup, toParticipant, type WacliGroup, type WacliParticipant } from '../../wacli/shape.js';
+import { asList, toGroup, toParticipant, type WacliGroup, type WacliParticipant } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { effectiveLimit, ok } from '../result.js';
 import { GroupSchema, limitInput, ParticipantSchema, recipientInput } from '../schemas.js';
@@ -3219,7 +3231,7 @@ export function registerGroupTools(server: McpServer, deps: ServerDeps): void {
         const n = effectiveLimit(limit, 50, limits.maxResults);
         const args = ['groups', 'list', `--limit=${n}`];
         if (query) args.push(`--query=${query}`);
-        const rows = await deps.runner.read<WacliGroup[]>(args);
+        const rows = asList(await deps.runner.read<WacliGroup[] | null>(args));
         return ok({ groups: rows.slice(0, n).map(toGroup) });
       } catch (e) {
         return toToolError(e);
@@ -3240,10 +3252,10 @@ export function registerGroupTools(server: McpServer, deps: ServerDeps): void {
       try {
         const resolved = await deps.resolver.resolve(group);
         if (resolved.kind !== 'group') throw new AgentError('invalid_input', `"${group}" is not a group (it is a ${resolved.kind}).`);
-        const rows = await deps.runner.read<WacliGroup[]>(['groups', 'list', `--query=${resolved.jid}`, '--limit=5']);
+        const rows = asList(await deps.runner.read<WacliGroup[] | null>(['groups', 'list', `--query=${resolved.jid}`, '--limit=5']));
         const row = rows.find((g) => g.JID === resolved.jid);
         const base = row ? toGroup(row) : { jid: resolved.jid, name: resolved.name, owner_jid: null, is_community: false, linked_parent_jid: null, created_at: null };
-        const participants = (await deps.runner.read<WacliParticipant[]>(['groups', 'participants', 'list', `--jid=${resolved.jid}`])).map(toParticipant);
+        const participants = asList(await deps.runner.read<WacliParticipant[] | null>(['groups', 'participants', 'list', `--jid=${resolved.jid}`])).map(toParticipant);
         return ok({ ...base, name: base.name ?? resolved.name, participant_count: participants.length, participants });
       } catch (e) {
         return toToolError(e);
@@ -3394,7 +3406,7 @@ Expected: FAIL, tools not found (`isError` or "Tool read_messages not found").
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { toToolError } from '../../errors.js';
-import { toMessage, type WacliContext, type WacliMessagePage } from '../../wacli/shape.js';
+import { asList, toMessage, type WacliContext, type WacliMessagePage } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { effectiveLimit, ok } from '../result.js';
 import { dateInput, limitInput, MessageSchema, messageIdInput, PageSchema, recipientInput, ResolvedSchema } from '../schemas.js';
@@ -3432,7 +3444,7 @@ export function registerMessageTools(server: McpServer, deps: ServerDeps): void 
         if (after) args.push(`--after=${after}`);
         if (cursor) args.push(`--cursor=${cursor}`);
         const page = await deps.runner.read<WacliMessagePage>(args);
-        const messages = page.messages.slice(0, n).map(toMessage).reverse();
+        const messages = asList(page.messages).slice(0, n).map(toMessage).reverse();
         return ok({ chat: resolved, order: 'oldest_first', messages, page: pageOf(page) });
       } catch (e) {
         return toToolError(e);
@@ -3472,7 +3484,7 @@ export function registerMessageTools(server: McpServer, deps: ServerDeps): void 
         if (cursor) args.push(`--cursor=${cursor}`);
         args.push('--', query);
         const page = await deps.runner.read<WacliMessagePage>(args);
-        return ok({ messages: page.messages.slice(0, n).map(toMessage), page: pageOf(page) });
+        return ok({ messages: asList(page.messages).slice(0, n).map(toMessage), page: pageOf(page) });
       } catch (e) {
         return toToolError(e);
       }
@@ -3499,7 +3511,7 @@ export function registerMessageTools(server: McpServer, deps: ServerDeps): void 
         const ctx = await deps.runner.read<WacliContext>([
           'messages', 'context', `--chat=${resolved.jid}`, `--id=${message_id}`, `--before=${before ?? 5}`, `--after=${after ?? 5}`,
         ]);
-        return ok({ chat: resolved, target_id: message_id, messages: ctx.messages.map(toMessage) });
+        return ok({ chat: resolved, target_id: message_id, messages: asList(ctx.messages).map(toMessage) });
       } catch (e) {
         return toToolError(e);
       }
