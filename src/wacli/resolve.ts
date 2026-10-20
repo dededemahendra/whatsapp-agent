@@ -5,6 +5,7 @@ import { asList, kindFromJid, kindFromWacli, nonEmpty, type ChatKind, type Wacli
 export interface Resolved { jid: string; name: string | null; kind: ChatKind }
 export interface Resolver { resolve(input: string): Promise<Resolved> }
 
+const USER_DOMAIN = '@s.whatsapp.net';
 export const JID_RE = /^[^@\s]+@(s\.whatsapp\.net|g\.us|lid|newsletter|broadcast)$/;
 
 export function digitsOf(s: string): string {
@@ -76,6 +77,10 @@ function ambiguous(input: string, candidates: Candidate[]): AgentError {
 export function createResolver(runner: Runner): Resolver {
   async function byJid(input: string): Promise<Resolved> {
     const jid = canonicalJid(input);
+    const user = jid.endsWith(USER_DOMAIN) ? jid.slice(0, -USER_DOMAIN.length) : null;
+    if (user !== null && !/^\d{6,15}$/.test(user)) {
+      throw new AgentError('invalid_input', `"${input}" is not a valid WhatsApp number: the part before @ must be 6 to 15 digits.`);
+    }
     const chats = asList(await runner.read<WacliChat[] | null>(['chats', 'list', `--query=${jid}`, '--limit=5']));
     const hit = chats.find((c) => c.jid === jid);
     return { jid, name: hit ? nonEmpty(hit.name) : null, kind: hit ? kindFromWacli(hit.kind, jid) : kindFromJid(jid) };

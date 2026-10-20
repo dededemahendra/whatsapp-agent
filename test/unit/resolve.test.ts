@@ -254,3 +254,19 @@ describe('name lookups see 50 rows', () => {
     });
   });
 });
+
+describe('the user part of a JID', () => {
+  it('is refused unless it is 6 to 15 digits once canonicalised, and nothing is looked up', async () => {
+    for (const bad of [':12@s.whatsapp.net', '+@s.whatsapp.net', 'abc@s.whatsapp.net', '12345@s.whatsapp.net', '1234567890123456@s.whatsapp.net', '6140+000001@s.whatsapp.net', '+abc:3@s.whatsapp.net']) {
+      await expect(resolver().resolve(bad)).rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining('6 to 15 digits') });
+    }
+    expect(await readArgvLog(log)).toEqual([]);
+  });
+
+  it('accepts a plus or a device suffix on a good number, and leaves other JIDs untouched', async () => {
+    expect((await resolver().resolve('+61400000001:9@s.whatsapp.net')).jid).toBe('61400000001@s.whatsapp.net');
+    expect(await resolver().resolve('100000000000001@lid')).toEqual({ jid: '100000000000001@lid', name: null, kind: 'user' });
+    expect(await resolver().resolve('abc@lid')).toEqual({ jid: 'abc@lid', name: null, kind: 'user' });
+    expect((await resolver().resolve('120363000000000001@g.us')).kind).toBe('group');
+  });
+});
