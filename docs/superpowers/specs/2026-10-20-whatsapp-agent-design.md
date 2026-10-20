@@ -612,8 +612,9 @@ Package manager: pnpm. Node engines `>=20`.
 Facts learnt from the wacli and MCP SDK sources while writing the plan. Each
 overrides the earlier text where they differ.
 
-- A1. Node engines are `>=22` and CI runs Node 22, 24 and 26. Node 20 reached
-  end of life in April 2026.
+- A1. Node engines are `>=22.12.0` (the floor commander 15 and vitest 5
+  require) and CI runs Node 22, 24 and 26. Node 20 reached end of life in
+  April 2026.
 - A2. No bundler. `tsc` emits ESM to `dist/`; `bin/whatsapp-agent.mjs` is a
   shim that imports `dist/cli.js`. `tsdown` is dropped.
 - A3. `wacli version` prints plain text (for example `0.22.0`) and has no
