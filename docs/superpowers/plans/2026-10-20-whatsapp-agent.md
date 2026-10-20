@@ -1901,14 +1901,14 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `AgentError` (Task 2), `ensurePrivateDir` (Task 2).
-- Produces: `PolicySchema` (zod), `type Policy`, `DEFAULT_POLICY: Policy`, `loadPolicy(file: string): Promise<Policy>` (missing file returns defaults, invalid file throws `invalid_input`), `savePolicy(file: string, policy: Policy): Promise<void>` (validates, writes 0600 atomically), `type ConfirmMode = 'always' | 'unlisted' | 'never'`.
+- Produces: `PolicySchema` (zod), `type Policy`, `DEFAULT_POLICY: Policy`, `loadPolicy(file: string): Promise<Policy>` (missing file returns defaults, invalid file throws `invalid_input`), `savePolicy(file: string, policy: Policy): Promise<void>` (validates with `invalid_input` naming the file, writes 0600 atomically); `fileRoots` entries must be absolute paths; unreadable policy files are `invalid_input` too, `type ConfirmMode = 'always' | 'unlisted' | 'never'`.
 
 - [ ] **Step 1: Write the failing tests**
 
 `test/unit/policy-schema.test.ts`:
 
 ```ts
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_POLICY, loadPolicy, PolicySchema, savePolicy } from '../../src/policy/schema.js';
@@ -1954,6 +1954,24 @@ describe('policy schema', () => {
     await writeFile(file, '{"version":1,"writes":{}}');
     await expect(loadPolicy(file)).rejects.toMatchObject({ code: 'invalid_input' });
   });
+
+  it('rejects relative file roots and accepts absolute ones', () => {
+    expect(PolicySchema.safeParse({ ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, fileRoots: ['Documents'] } }).success).toBe(false);
+    expect(PolicySchema.safeParse({ ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, fileRoots: ['/tmp'] } }).success).toBe(true);
+  });
+
+  it('throws invalid_input from savePolicy for a bad policy and writes nothing', async () => {
+    const file = path.join(tmp, 'cfg', 'policy.json');
+    await expect(savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: [''] } }))
+      .rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining(file) });
+    await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('throws invalid_input when the policy path cannot be read', async () => {
+    const dir = path.join(tmp, 'policy.json');
+    await mkdir(dir);
+    await expect(loadPolicy(dir)).rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining('EISDIR') });
+  });
 });
 ```
 
@@ -1985,7 +2003,7 @@ export const PolicySchema = z.strictObject({
       perHour: z.int().min(1).max(1000),
       minGapSeconds: z.int().min(0).max(3600),
     }),
-    fileRoots: z.array(z.string().min(1)).max(50),
+    fileRoots: z.array(z.string().min(1).refine((p) => path.isAbsolute(p), 'must be an absolute path')).max(50),
   }),
   limits: z.strictObject({
     maxResults: z.int().min(1).max(200),
@@ -2029,13 +2047,18 @@ export const DEFAULT_POLICY: Policy = {
   },
 };
 
+function describeIssues(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+}
+
 export async function loadPolicy(file: string): Promise<Policy> {
   let raw: string;
   try {
     raw = await readFile(file, 'utf8');
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return structuredClone(DEFAULT_POLICY);
-    throw e;
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return structuredClone(DEFAULT_POLICY);
+    throw new AgentError('invalid_input', `${file} could not be read${code ? ` (${code})` : ''}`);
   }
   let parsed: unknown;
   try {
@@ -2044,15 +2067,14 @@ export async function loadPolicy(file: string): Promise<Policy> {
     throw new AgentError('invalid_input', `${file} is not valid JSON`);
   }
   const result = PolicySchema.safeParse(parsed);
-  if (!result.success) {
-    const issues = result.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
-    throw new AgentError('invalid_input', `${file} is invalid: ${issues}`);
-  }
+  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error)}`);
   return result.data;
 }
 
 export async function savePolicy(file: string, policy: Policy): Promise<void> {
-  const data = PolicySchema.parse(policy);
+  const result = PolicySchema.safeParse(policy);
+  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error)}`);
+  const data = result.data;
   await ensurePrivateDir(path.dirname(file));
   const tmp = `${file}.${process.pid}.tmp`;
   await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
@@ -2064,7 +2086,7 @@ export async function savePolicy(file: string, policy: Policy): Promise<void> {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/policy-schema.test.ts && pnpm typecheck`
-Expected: PASS (5 tests).
+Expected: PASS (8 tests).
 
 - [ ] **Step 5: Commit**
 
