@@ -1,8 +1,8 @@
 import { CLIENT_CAPABILITIES_META_KEY, type McpServer } from '@modelcontextprotocol/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
-  clientCanConfirm, confirmationRequired, confirmCodec, confirmDigest, describeTarget, elicitationSupportsForm, filePrompt, fileState, reactPrompt, reactState, readAnswer,
-  sanitiseName, textPrompt, textState, type ConfirmState, type FileSend, type HandlerCtx, type ReactSend, type TextSend,
+  clientCanConfirm, confirmationRequired, confirmCodec, confirmDigest, consumedNonceCount, describeTarget, elicitationSupportsForm, filePrompt, fileState, reactPrompt, reactState, readAnswer,
+  sanitiseName, textPrompt, textState, type ConfirmBinding, type FileSend, type HandlerCtx, type ReactSend, type TextSend,
 } from '../../src/mcp/confirm.js';
 import type { Resolved } from '../../src/wacli/resolve.js';
 
@@ -163,17 +163,20 @@ describe('what a confirmation is bound to', () => {
 });
 
 describe('readAnswer', () => {
-  const expected: ConfirmState = { kind: 'text', jid: '61400000001@s.whatsapp.net', chatKind: 'user', digest: 'd'.repeat(64) };
+  const expected: ConfirmBinding = { kind: 'text', jid: '61400000001@s.whatsapp.net', chatKind: 'user', digest: 'd'.repeat(64) };
   const accept = { confirm: { action: 'accept', content: { confirm: true } } };
   const ctx = (inputResponses: Record<string, unknown> | undefined, state: unknown): HandlerCtx => ({ mcpReq: { inputResponses, requestState: (() => state) as HandlerCtx['mcpReq']['requestState'] } });
+  let counter = 0;
+  /** The state a prompt for `expected` would have carried, with a nonce no other test has used. */
+  const stateWith = (over: Record<string, unknown> = {}): Record<string, unknown> => ({ ...expected, nonce: `nonce-${(counter += 1)}-${Math.random().toString(16).slice(2)}`, ...over });
 
   it('accepts only an accept with the box ticked and a state that matches what is being sent', () => {
-    expect(readAnswer(ctx(accept, { ...expected }), expected)).toBe('accepted');
+    expect(readAnswer(ctx(accept, stateWith()), expected)).toBe('accepted');
   });
 
   it('asks again when there is no answer yet', () => {
     expect(readAnswer(ctx(undefined, undefined), expected)).toBe('none');
-    expect(readAnswer(ctx({}, { ...expected }), expected)).toBe('none');
+    expect(readAnswer(ctx({}, stateWith()), expected)).toBe('none');
   });
 
   it('asks again, never accepts, when the state is absent', () => {
@@ -183,7 +186,7 @@ describe('readAnswer', () => {
 
   it('asks again when the state was minted for something else', () => {
     for (const field of ['kind', 'jid', 'chatKind', 'digest'] as const) {
-      expect(readAnswer(ctx(accept, { ...expected, [field]: 'other' }), expected), field).toBe('none');
+      expect(readAnswer(ctx(accept, stateWith({ [field]: 'other' })), expected), field).toBe('none');
     }
     expect(readAnswer(ctx(accept, 'a string'), expected)).toBe('none');
     expect(readAnswer(ctx(accept, 42), expected)).toBe('none');
@@ -192,12 +195,74 @@ describe('readAnswer', () => {
   });
 
   it('keeps anything that is not an accept with confirm true as declined', () => {
-    expect(readAnswer(ctx({ confirm: { action: 'decline' } }, { ...expected }), expected)).toBe('declined');
-    expect(readAnswer(ctx({ confirm: { action: 'cancel' } }, { ...expected }), expected)).toBe('declined');
-    expect(readAnswer(ctx({ confirm: { action: 'accept', content: { confirm: false } } }, { ...expected }), expected)).toBe('declined');
-    expect(readAnswer(ctx({ confirm: { action: 'accept', content: { confirm: 'yes' } } }, { ...expected }), expected)).toBe('declined');
-    expect(readAnswer(ctx({ confirm: { action: 'accept' } }, { ...expected }), expected)).toBe('declined');
+    expect(readAnswer(ctx({ confirm: { action: 'decline' } }, stateWith()), expected)).toBe('declined');
+    expect(readAnswer(ctx({ confirm: { action: 'cancel' } }, stateWith()), expected)).toBe('declined');
+    expect(readAnswer(ctx({ confirm: { action: 'accept', content: { confirm: false } } }, stateWith()), expected)).toBe('declined');
+    expect(readAnswer(ctx({ confirm: { action: 'accept', content: { confirm: 'yes' } } }, stateWith()), expected)).toBe('declined');
+    expect(readAnswer(ctx({ confirm: { action: 'accept' } }, stateWith()), expected)).toBe('declined');
     expect(readAnswer(ctx({ confirm: { action: 'decline' } }, undefined), expected)).toBe('declined');
+  });
+
+  describe('a state can be accepted once', () => {
+    it('asks again when the same state comes back after it was accepted', () => {
+      const state = stateWith();
+      expect(readAnswer(ctx(accept, state), expected)).toBe('accepted');
+      expect(readAnswer(ctx(accept, { ...state }), expected)).toBe('none');
+      expect(readAnswer(ctx(accept, { ...state }), expected)).toBe('none');
+    });
+
+    it('accepts another state for the very same send, because every prompt has a nonce of its own', () => {
+      const a = stateWith();
+      const b = stateWith();
+      expect(a.nonce).not.toBe(b.nonce);
+      expect(readAnswer(ctx(accept, a), expected)).toBe('accepted');
+      expect(readAnswer(ctx(accept, b), expected)).toBe('accepted');
+    });
+
+    it('does not use a nonce up on an answer that did not match, so the right call can still use it', () => {
+      const state = stateWith();
+      expect(readAnswer(ctx(accept, state), { ...expected, digest: 'e'.repeat(64) })).toBe('none');
+      expect(readAnswer(ctx(accept, state), expected)).toBe('accepted');
+    });
+
+    it('does not use a nonce up on a decline', () => {
+      const state = stateWith();
+      expect(readAnswer(ctx({ confirm: { action: 'decline' } }, state), expected)).toBe('declined');
+      expect(readAnswer(ctx(accept, state), expected)).toBe('accepted');
+    });
+
+    it('never accepts a state that has no usable nonce', () => {
+      for (const nonce of [undefined, null, '', 7, ['x'], { n: 1 }]) {
+        expect(readAnswer(ctx(accept, stateWith({ nonce })), expected), JSON.stringify(nonce)).toBe('none');
+      }
+      const bare: Record<string, unknown> = { ...expected };
+      expect(readAnswer(ctx(accept, bare), expected)).toBe('none');
+      expect(readAnswer(ctx(accept, bare), expected)).toBe('none');
+    });
+
+    it('forgets a nonce when its five minutes are up, and prunes whenever an answer is read', () => {
+      const now = Date.now();
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(now);
+        const first = stateWith();
+        const second = stateWith();
+        expect(readAnswer(ctx(accept, first), expected)).toBe('accepted');
+        expect(readAnswer(ctx(accept, second), expected)).toBe('accepted');
+        expect(consumedNonceCount()).toBeGreaterThanOrEqual(2);
+
+        vi.setSystemTime(now + 299_000);
+        expect(readAnswer(ctx(accept, first), expected)).toBe('none');
+
+        vi.setSystemTime(now + 301_000);
+        expect(readAnswer(ctx(undefined, undefined), expected)).toBe('none');
+        expect(consumedNonceCount()).toBe(0);
+        expect(readAnswer(ctx(accept, first), expected)).toBe('accepted'); // long past what the SDK would still have verified
+        expect(consumedNonceCount()).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
 
@@ -267,14 +332,23 @@ describe('confirmation prompts', () => {
 });
 
 describe('the confirmation request', () => {
-  const state: ConfirmState = { kind: 'text', jid: '61400000001@s.whatsapp.net', chatKind: 'user', digest: 'a'.repeat(64) };
+  const binding: ConfirmBinding = { kind: 'text', jid: '61400000001@s.whatsapp.net', chatKind: 'user', digest: 'a'.repeat(64) };
 
   it('asks one form question and carries the state as a signed, expiring string', async () => {
-    const r = await confirmationRequired('Send to Alice?', state);
+    const r = await confirmationRequired('Send to Alice?', binding);
     expect(r.resultType).toBe('input_required');
     expect(Object.keys(r.inputRequests ?? {})).toEqual(['confirm']);
     expect(r.inputRequests!.confirm).toMatchObject({ method: 'elicitation/create', params: { message: 'Send to Alice?', mode: 'form' } });
-    expect(await confirmCodec().verify(r.requestState!, undefined as never)).toEqual(state);
+    expect(await confirmCodec().verify(r.requestState!, undefined as never)).toEqual({ ...binding, nonce: expect.stringMatching(/^[0-9a-f]{32}$/) });
+  });
+
+  it('mints a nonce of its own for every prompt, so two prompts for the same send never share a state', async () => {
+    const prompts = await Promise.all(Array.from({ length: 25 }, () => confirmationRequired('Send to Alice?', binding)));
+    const states = prompts.map((p) => p.requestState!);
+    expect(new Set(states).size).toBe(25);
+    const nonces = await Promise.all(states.map(async (st) => (await confirmCodec().verify(st, undefined as never)).nonce));
+    expect(new Set(nonces).size).toBe(25);
+    for (const n of nonces) expect(n).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('uses one codec for the whole process, so a state minted anywhere in it verifies everywhere in it', () => {
@@ -282,7 +356,7 @@ describe('the confirmation request', () => {
   });
 
   it('does not verify a state from another codec, or one that has been cut short', async () => {
-    const r = await confirmationRequired('Send to Alice?', state);
+    const r = await confirmationRequired('Send to Alice?', binding);
     await expect(confirmCodec().verify(r.requestState!.slice(0, -4), undefined as never)).rejects.toThrow();
     await expect(confirmCodec().verify(r.requestState!.replace(/^v1\.[^.]+/, 'v1.e30'), undefined as never)).rejects.toThrow();
   });

@@ -68,14 +68,24 @@ export function describeTarget(r: Resolved): string {
 export type ConfirmKind = 'text' | 'file' | 'react';
 
 /**
- * What a confirmation is bound to. It is signed but not encrypted, so it holds the chat and a digest of what is sent, never the content.
+ * What a confirmation is bound to: the kind of write, the chat and a digest of everything that changes what is sent. Each call works this out
+ * for itself, and an answer counts only when the state that came back says the same.
  */
-export interface ConfirmState {
+export interface ConfirmBinding {
   kind: ConfirmKind;
   jid: string;
   chatKind: ChatKind;
   /** SHA-256 hex over every field that changes what the send does. */
   digest: string;
+}
+
+/**
+ * The payload of a prompt's signed state: the binding plus a nonce. It is signed but not encrypted, so it holds the chat and a digest of what
+ * is sent, never the content. The nonce is minted with the prompt and lets the state be accepted once.
+ */
+export interface ConfirmState extends ConfirmBinding {
+  /** 16 random bytes as hex. */
+  nonce: string;
 }
 
 export interface TextSend { text: string; replyTo?: string; replyToSender?: string; mentions?: string[]; linkPreview?: boolean }
@@ -90,18 +100,18 @@ export function confirmDigest(kind: ConfirmKind, jid: string, chatKind: ChatKind
   return createHash('sha256').update(JSON.stringify([kind, jid, chatKind, pairs])).digest('hex');
 }
 
-const stateOf = (kind: ConfirmKind, to: Resolved, fields: Record<string, DigestField>): ConfirmState =>
+const stateOf = (kind: ConfirmKind, to: Resolved, fields: Record<string, DigestField>): ConfirmBinding =>
   ({ kind, jid: to.jid, chatKind: to.kind, digest: confirmDigest(kind, to.jid, to.kind, fields) });
 
-export const textState = (to: Resolved, s: TextSend): ConfirmState => stateOf('text', to, {
+export const textState = (to: Resolved, s: TextSend): ConfirmBinding => stateOf('text', to, {
   text: s.text, reply_to: s.replyTo, reply_to_sender: s.replyToSender, mentions: s.mentions ?? [], link_preview: s.linkPreview !== false,
 });
 
-export const fileState = (to: Resolved, f: FileSend): ConfirmState => stateOf('file', to, {
+export const fileState = (to: Resolved, f: FileSend): ConfirmBinding => stateOf('file', to, {
   path: f.realPath, size: f.size, mtime: f.mtimeMs, caption: f.caption, as: f.as ?? 'auto', filename: f.filename,
 });
 
-export const reactState = (to: Resolved, r: ReactSend): ConfirmState => stateOf('react', to, {
+export const reactState = (to: Resolved, r: ReactSend): ConfirmBinding => stateOf('react', to, {
   reaction: r.reaction, message_id: r.messageId, sender: r.sender,
 });
 
@@ -131,6 +141,9 @@ export function reactPrompt(to: Resolved, r: ReactSend): string {
   return `${head} to message ${sanitiseName(r.messageId)} in ${describeTarget(to)}?${r.sender ? `\n\n${line('Original sender', sanitiseName(r.sender))}` : ''}`;
 }
 
+/** How long a prompt's state stays good, in seconds. The nonce of an accepted state is remembered for as long. */
+const STATE_TTL_SECONDS = 300;
+
 let codec: RequestStateCodec<ConfirmState> | undefined;
 
 /**
@@ -138,11 +151,22 @@ let codec: RequestStateCodec<ConfirmState> | undefined;
  * verify, and a state stops verifying five minutes after it was minted.
  */
 export function confirmCodec(): RequestStateCodec<ConfirmState> {
-  codec ??= createRequestStateCodec<ConfirmState>({ key: randomBytes(32), ttlSeconds: 300 });
+  codec ??= createRequestStateCodec<ConfirmState>({ key: randomBytes(32), ttlSeconds: STATE_TTL_SECONDS });
   return codec;
 }
 
-const sameState = (actual: unknown, expected: ConfirmState): boolean => {
+/**
+ * Nonces of states that have been accepted, each with the time (ms) after which it can be forgotten. A state is only good for five minutes
+ * and the nonce is kept for five minutes from its acceptance, so by the time it is forgotten the SDK refuses the state anyway.
+ */
+const consumed = new Map<string, number>();
+
+/** How many accepted nonces are being remembered. For tests. */
+export function consumedNonceCount(): number {
+  return consumed.size;
+}
+
+const sameBinding = (actual: unknown, expected: ConfirmBinding): actual is Record<string, unknown> => {
   if (typeof actual !== 'object' || actual === null) return false;
   const s = actual as Record<string, unknown>;
   return s.kind === expected.kind && s.jid === expected.jid && s.chatKind === expected.chatKind && s.digest === expected.digest;
@@ -150,18 +174,27 @@ const sameState = (actual: unknown, expected: ConfirmState): boolean => {
 
 /**
  * The person's answer to the prompt for exactly this send. An accept counts only when the state that came back with it (already proven
- * genuine and unexpired by the SDK before the handler ran) matches the send being made now; otherwise the person is asked again.
- * Anything that is not an accept with the box ticked stays declined.
+ * genuine and unexpired by the SDK before the handler ran) matches the send being made now and has not been accepted before; otherwise the
+ * person is asked again. Anything that is not an accept with the box ticked stays declined. Accepting uses the state's nonce up.
  */
-export function readAnswer(ctx: HandlerCtx, expected: ConfirmState): Answer {
+export function readAnswer(ctx: HandlerCtx, expected: ConfirmBinding): Answer {
+  const now = Date.now();
+  for (const [nonce, until] of consumed) if (until < now) consumed.delete(nonce);
   const view = inputResponse(ctx.mcpReq.inputResponses, 'confirm');
   if (view.kind === 'missing') return 'none';
   const accepted = acceptedContent(ctx.mcpReq.inputResponses, 'confirm', ConfirmSchema);
   if (accepted?.confirm !== true) return 'declined';
-  return sameState(ctx.mcpReq.requestState<unknown>(), expected) ? 'accepted' : 'none';
+  const state = ctx.mcpReq.requestState<unknown>();
+  if (!sameBinding(state, expected)) return 'none';
+  const nonce = state.nonce;
+  if (typeof nonce !== 'string' || nonce === '' || consumed.has(nonce)) return 'none';
+  consumed.set(nonce, now + STATE_TTL_SECONDS * 1000);
+  return 'accepted';
 }
 
-export async function confirmationRequired(message: string, state: ConfirmState): Promise<InputRequiredResult> {
+/** The prompt, with a state minted for it: the binding plus a nonce that belongs to this prompt alone. */
+export async function confirmationRequired(message: string, binding: ConfirmBinding): Promise<InputRequiredResult> {
+  const state: ConfirmState = { ...binding, nonce: randomBytes(16).toString('hex') };
   return inputRequired({
     inputRequests: { confirm: inputRequired.elicit({ message, requestedSchema: ConfirmSchema }) },
     requestState: await confirmCodec().mint(state),

@@ -12,7 +12,7 @@ import { SEND_UNCERTAIN, type RunOptions } from '../../wacli/runner.js';
 import type { WacliChatStateResult, WacliSendResult } from '../../wacli/shape.js';
 import {
   clientCanConfirm, confirmationRequired, filePrompt, fileState, reactPrompt, reactState, readAnswer, textPrompt, textState,
-  type ConfirmState, type FileSend, type HandlerCtx, type ReactSend, type TextSend,
+  type ConfirmBinding, type FileSend, type HandlerCtx, type ReactSend, type TextSend,
 } from '../confirm.js';
 import type { ServerDeps } from '../deps.js';
 import { ok } from '../result.js';
@@ -116,7 +116,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
    * `expect` is what this call would send: an accept counts only if the state it came back with was minted for exactly that.
    * `policy` is the snapshot the caller already used for its own checks; without one the policy is read here.
    */
-  async function gate(ctx: HandlerCtx, tool: WriteTool, recipient: Resolved, extra: { policy?: Policy; fileInsideRoots?: boolean; expect?: ConfirmState } = {}): Promise<Decision> {
+  async function gate(ctx: HandlerCtx, tool: WriteTool, recipient: Resolved, extra: { policy?: Policy; fileInsideRoots?: boolean; expect?: ConfirmBinding } = {}): Promise<Decision> {
     return serialised(async () => {
       const policy = extra.policy ?? await deps.loadPolicy();
       const rate = await deps.rateLimiter.snapshot(deps.now());

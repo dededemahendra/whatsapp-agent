@@ -5,7 +5,7 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { createRequestStateCodec } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fileState, textState, type ConfirmState } from '../../src/mcp/confirm.js';
+import { confirmCodec, fileState, textState, type ConfirmState } from '../../src/mcp/confirm.js';
 import { createServer } from '../../src/mcp/server.js';
 import type { Policy } from '../../src/policy/schema.js';
 import type { Resolver } from '../../src/wacli/resolve.js';
@@ -46,6 +46,7 @@ describe('a confirmation round over the 2026-07-28 era', () => {
     const { p, exp } = payloadOf(round.requestState!);
     expect(p).toMatchObject({ kind: 'text', jid: ALICE, chatKind: 'user' });
     expect(p.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(p.nonce).toMatch(/^[0-9a-f]{32}$/);
     expect(p.digest).toBe(textState({ jid: ALICE, name: 'Alice', kind: 'user' }, { text: 'a secret plan' }).digest);
     expect(JSON.stringify(p)).not.toContain('secret');
     const ttl = exp - Math.floor(Date.now() / 1000);
@@ -85,7 +86,7 @@ describe('a confirmation round over the 2026-07-28 era', () => {
   it('refuses a state signed with another key, even when it carries the right digest', async () => {
     h = await makeHarness({ policy: enabled(), manualRounds: true });
     const forger = createRequestStateCodec<ConfirmState>({ key: randomBytes(32), ttlSeconds: 300 });
-    const forged = await forger.mint(textState({ jid: ALICE, name: 'Alice', kind: 'user' }, { text: 'hello' }));
+    const forged = await forger.mint({ ...textState({ jid: ALICE, name: 'Alice', kind: 'user' }, { text: 'hello' }), nonce: 'f'.repeat(32) });
     await expectProtocolRefusal(h.callRound('send_text', { to: 'Alice', message: 'hello' }, { inputResponses: accept, requestState: forged }));
     expect(await sends()).toHaveLength(0);
     expect(h.audits).toHaveLength(0);
@@ -209,6 +210,101 @@ describe('a confirmation round over the 2026-07-28 era', () => {
     h = await makeHarness({ policy: enabled(), elicitation: 'none' });
     expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('confirmation_unavailable');
     expect(await sends()).toHaveLength(0);
+  });
+});
+
+describe('a confirmation can be accepted once', () => {
+  const args = { to: 'Alice', message: 'hello' };
+
+  it('asks again, and sends nothing more, when the same answer and state are replayed after the send', async () => {
+    h = await makeHarness({ policy: enabled(), manualRounds: true });
+    const first = await h.callRound('send_text', args);
+    const done = await h.callRound('send_text', args, { inputResponses: accept, requestState: first.requestState });
+    expect(done.isError).toBeFalsy();
+    expect(await sends()).toHaveLength(1);
+
+    const replay = await h.callRound('send_text', args, { inputResponses: accept, requestState: first.requestState });
+    expect(replay.resultType).toBe('input_required');
+    expect(replay.requestState).toBeDefined();
+    expect(replay.requestState).not.toBe(first.requestState);
+    expect(payloadOf(replay.requestState!).p.nonce).not.toBe(payloadOf(first.requestState!).p.nonce);
+    expect(payloadOf(replay.requestState!).p.digest).toBe(payloadOf(first.requestState!).p.digest);
+    expect(await sends()).toHaveLength(1);
+    expect(sentRows()).toHaveLength(1);
+    expect(h.audits.map((a) => a.outcome)).toEqual(['attempted', 'sent']);
+
+    const again = await h.callRound('send_text', args, { inputResponses: accept, requestState: replay.requestState });
+    expect(again.isError).toBeFalsy();
+    expect(await sends()).toHaveLength(2);
+  });
+
+  it('gives two prompts for the same text and recipient two different states', async () => {
+    h = await makeHarness({ policy: enabled(), manualRounds: true });
+    const a = await h.callRound('send_text', args);
+    const b = await h.callRound('send_text', args);
+    expect(a.requestState).not.toBe(b.requestState);
+    expect(payloadOf(a.requestState!).p.nonce).not.toBe(payloadOf(b.requestState!).p.nonce);
+    expect(payloadOf(a.requestState!).p).toMatchObject({ kind: 'text', jid: ALICE, digest: payloadOf(b.requestState!).p.digest });
+  });
+
+  it('lets one of two identical answers sent at the same moment through, and asks again for the other', async () => {
+    h = await makeHarness({ policy: enabled(), manualRounds: true });
+    const first = await h.callRound('send_text', args);
+    const [a, b] = await Promise.all([
+      h.callRound('send_text', args, { inputResponses: accept, requestState: first.requestState }),
+      h.callRound('send_text', args, { inputResponses: accept, requestState: first.requestState }),
+    ]);
+    expect([a, b].map((r) => (r.resultType === 'input_required' ? 'asked' : r.isError ? 'error' : 'sent')).sort()).toEqual(['asked', 'sent']);
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it('does not use a state up by answering a different send with it', async () => {
+    h = await makeHarness({ policy: enabled(), manualRounds: true });
+    const first = await h.callRound('send_text', args);
+    const other = await h.callRound('send_text', { ...args, message: 'something else' }, { inputResponses: accept, requestState: first.requestState });
+    expect(other.resultType).toBe('input_required');
+    const done = await h.callRound('send_text', args, { inputResponses: accept, requestState: first.requestState });
+    expect(done.isError).toBeFalsy();
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it('does not use a state up by declining with it', async () => {
+    h = await makeHarness({ policy: enabled(), manualRounds: true });
+    const first = await h.callRound('send_text', args);
+    const declined = await h.callRound('send_text', args, { inputResponses: { confirm: { action: 'decline' } }, requestState: first.requestState });
+    expect(JSON.parse(declined.content![0]!.text!)).toMatchObject({ error: 'confirmation_declined' });
+    expect(await sends()).toHaveLength(0);
+  });
+
+  it('never takes a validly signed state that has no nonce', async () => {
+    h = await makeHarness({ policy: enabled(), manualRounds: true });
+    const binding = textState({ jid: ALICE, name: 'Alice', kind: 'user' }, { text: 'hello' });
+    const bare = await confirmCodec().mint(binding as ConfirmState);
+    const next = await h.callRound('send_text', args, { inputResponses: accept, requestState: bare });
+    expect(next.resultType).toBe('input_required');
+    expect(await sends()).toHaveLength(0);
+  });
+
+  it('applies to a reaction and a file as well', async () => {
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      const file = path.join(outbox, 'report.pdf');
+      await writeFile(file, 'pdf');
+      h = await makeHarness({ policy: enabled({ fileRoots: [outbox] }), manualRounds: true });
+      const react = await h.callRound('react', { chat: 'Alice', message_id: 'MSG1', reaction: '👍' });
+      expect((await h.callRound('react', { chat: 'Alice', message_id: 'MSG1', reaction: '👍' }, { inputResponses: accept, requestState: react.requestState })).isError).toBeFalsy();
+      const replayed = await h.callRound('react', { chat: 'Alice', message_id: 'MSG1', reaction: '👍' }, { inputResponses: accept, requestState: react.requestState });
+      expect(replayed.resultType).toBe('input_required');
+      expect(await sends('send react')).toHaveLength(1);
+
+      const sendFile = await h.callRound('send_file', { to: 'Alice', path: file });
+      expect((await h.callRound('send_file', { to: 'Alice', path: file }, { inputResponses: accept, requestState: sendFile.requestState })).isError).toBeFalsy();
+      const again = await h.callRound('send_file', { to: 'Alice', path: file }, { inputResponses: accept, requestState: sendFile.requestState });
+      expect(again.resultType).toBe('input_required');
+      expect(await sends('send file')).toHaveLength(1);
+    } finally {
+      await removeTmp(outbox);
+    }
   });
 });
 
