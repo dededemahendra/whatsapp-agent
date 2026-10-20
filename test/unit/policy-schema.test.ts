@@ -1,4 +1,4 @@
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_POLICY, loadPolicy, PolicySchema, savePolicy } from '../../src/policy/schema.js';
@@ -43,5 +43,23 @@ describe('policy schema', () => {
     const file = path.join(tmp, 'policy.json');
     await writeFile(file, '{"version":1,"writes":{}}');
     await expect(loadPolicy(file)).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  it('rejects relative file roots and accepts absolute ones', () => {
+    expect(PolicySchema.safeParse({ ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, fileRoots: ['Documents'] } }).success).toBe(false);
+    expect(PolicySchema.safeParse({ ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, fileRoots: ['/tmp'] } }).success).toBe(true);
+  });
+
+  it('throws invalid_input from savePolicy for a bad policy and writes nothing', async () => {
+    const file = path.join(tmp, 'cfg', 'policy.json');
+    await expect(savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: [''] } }))
+      .rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining(file) });
+    await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('throws invalid_input when the policy path cannot be read', async () => {
+    const dir = path.join(tmp, 'policy.json');
+    await mkdir(dir);
+    await expect(loadPolicy(dir)).rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining('EISDIR') });
   });
 });

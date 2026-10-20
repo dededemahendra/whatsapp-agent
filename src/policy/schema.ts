@@ -16,7 +16,7 @@ export const PolicySchema = z.strictObject({
       perHour: z.int().min(1).max(1000),
       minGapSeconds: z.int().min(0).max(3600),
     }),
-    fileRoots: z.array(z.string().min(1)).max(50),
+    fileRoots: z.array(z.string().min(1).refine((p) => path.isAbsolute(p), 'must be an absolute path')).max(50),
   }),
   limits: z.strictObject({
     maxResults: z.int().min(1).max(200),
@@ -60,13 +60,18 @@ export const DEFAULT_POLICY: Policy = {
   },
 };
 
+function describeIssues(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+}
+
 export async function loadPolicy(file: string): Promise<Policy> {
   let raw: string;
   try {
     raw = await readFile(file, 'utf8');
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return structuredClone(DEFAULT_POLICY);
-    throw e;
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return structuredClone(DEFAULT_POLICY);
+    throw new AgentError('invalid_input', `${file} could not be read${code ? ` (${code})` : ''}`);
   }
   let parsed: unknown;
   try {
@@ -75,15 +80,14 @@ export async function loadPolicy(file: string): Promise<Policy> {
     throw new AgentError('invalid_input', `${file} is not valid JSON`);
   }
   const result = PolicySchema.safeParse(parsed);
-  if (!result.success) {
-    const issues = result.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
-    throw new AgentError('invalid_input', `${file} is invalid: ${issues}`);
-  }
+  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error)}`);
   return result.data;
 }
 
 export async function savePolicy(file: string, policy: Policy): Promise<void> {
-  const data = PolicySchema.parse(policy);
+  const result = PolicySchema.safeParse(policy);
+  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error)}`);
+  const data = result.data;
   await ensurePrivateDir(path.dirname(file));
   const tmp = `${file}.${process.pid}.tmp`;
   await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
