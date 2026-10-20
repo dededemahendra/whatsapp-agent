@@ -93,12 +93,12 @@ export function createResolver(runner: Runner): Resolver {
   }
 
   async function byName(input: string): Promise<Resolved> {
-    const chats = asList(await runner.read<WacliChat[] | null>(['chats', 'list', `--query=${input}`, '--limit=10']));
+    const chats = asList(await runner.read<WacliChat[] | null>(['chats', 'list', `--query=${input}`, '--limit=50']));
     const fromChats = pickUnique(chats.map((c) => ({ jid: c.jid, name: nonEmpty(c.name), kind: kindFromWacli(c.kind, c.jid) })), input);
     if (fromChats.kind === 'one') return fromChats.value;
     if (fromChats.kind === 'many') throw ambiguous(input, fromChats.candidates);
 
-    const contacts = asList(await runner.read<WacliContact[] | null>(['contacts', 'search', '--limit=10', '--', input]));
+    const contacts = asList(await runner.read<WacliContact[] | null>(['contacts', 'search', '--limit=50', '--', input]));
     const fromContacts = pickUnique(contacts.map((c) => ({
       jid: canonicalJid(c.jid), name: nonEmpty(c.name) ?? nonEmpty(c.alias), kind: 'user' as const, alias: nonEmpty(c.alias), system_name: nonEmpty(c.system_name),
     })), input);

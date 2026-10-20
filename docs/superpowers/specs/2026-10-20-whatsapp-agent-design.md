@@ -693,6 +693,9 @@ overrides the earlier text where they differ.
   `SuccessfulExit: false` and the systemd unit `Restart=on-failure`, so a
   revoked session is not relaunched by the service layer while supervisor
   crashes still are. A stop request interrupts a backoff sleep.
+- A22. Name lookups request 50 rows from both `chats list --query` and
+  `contacts search`, so an exact match is not missed behind partial ones; the
+  `ambiguous_recipient` payload still carries at most 10 candidates.
 - A25. The daemon logs the sanitised message of an `error` event and of a wacli
   failure envelope (controls stripped, JIDs and runs of 8 or more digits
   replaced, 200 characters at most); other recognised events stay name-only.

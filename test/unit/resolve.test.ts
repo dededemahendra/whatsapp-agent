@@ -89,7 +89,8 @@ describe('createResolver', () => {
     const r = await resolver({ FAKE_WACLI_EMPTY: 'chats list' }).resolve('Alice Example');
     expect(r).toEqual({ jid: '61400000001@s.whatsapp.net', name: 'Alice Example', kind: 'user' });
     const recs = await readArgvLog(log);
-    expect(recs[1]!.argv.slice(4)).toEqual(['contacts', 'search', '--limit=10', '--', 'Alice Example']);
+    expect(recs[0]!.argv.slice(4)).toEqual(['chats', 'list', '--query=Alice Example', '--limit=50']);
+    expect(recs[1]!.argv.slice(4)).toEqual(['contacts', 'search', '--limit=50', '--', 'Alice Example']);
   });
 
   it('returns not_found when nothing matches', async () => {
@@ -192,6 +193,64 @@ describe('contact matching on alias and system name', () => {
   it('leaves chat candidates unlabelled', async () => {
     await expect(resolver().resolve('a')).rejects.toMatchObject({
       details: { candidates: [expect.not.objectContaining({ matched_on: expect.anything() }), expect.not.objectContaining({ matched_on: expect.anything() })] },
+    });
+  });
+});
+
+describe('name lookups see 50 rows', () => {
+  const chat = (n: number, name: string) =>
+    ({ jid: `1203630000000${String(n).padStart(5, '0')}@g.us`, kind: 'group', name, last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 });
+  const contact = (n: number, name: string) =>
+    ({ jid: `614000${String(n).padStart(5, '0')}@s.whatsapp.net`, phone: `+614000${String(n).padStart(5, '0')}`, name, alias: '', system_name: '', updated_at: '2026-10-19T08:00:00Z' });
+  const envelope = (rows: unknown[]) => JSON.stringify({ success: true, data: rows, error: null });
+
+  async function withFixtures(files: Record<string, string>, fn: (r: ReturnType<typeof resolver>) => Promise<void>, extra: Record<string, string> = {}): Promise<void> {
+    const dir = await fixturesWith(files);
+    try {
+      await fn(resolver({ FAKE_WACLI_FIXTURES: dir, ...extra }));
+    } finally {
+      await removeTmp(dir);
+    }
+  }
+
+  it('asks for 50 rows from both the chat query and the contact search', async () => {
+    await expect(resolver({ FAKE_WACLI_EMPTY: 'chats list,contacts search' }).resolve('Nobody')).rejects.toMatchObject({ code: 'not_found' });
+    const recs = await readArgvLog(log);
+    expect(recs.map((r) => r.argv.slice(4))).toEqual([
+      ['chats', 'list', '--query=Nobody', '--limit=50'],
+      ['contacts', 'search', '--limit=50', '--', 'Nobody'],
+    ]);
+  });
+
+  it('is ambiguous when two chats are named exactly the same', async () => {
+    await withFixtures({ 'chats_list.json': envelope([chat(1, 'Mum'), chat(2, 'Mum'), chat(3, 'Mum and Dad')]) }, async (r) => {
+      await expect(r.resolve('mum')).rejects.toMatchObject({
+        code: 'ambiguous_recipient',
+        details: { candidates: [expect.objectContaining({ name: 'Mum' }), expect.objectContaining({ name: 'Mum' }), expect.objectContaining({ name: 'Mum and Dad' })] },
+      });
+    });
+  });
+
+  it('finds an exact chat match in row 11 of a 50-row list', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) => chat(i + 1, i === 10 ? 'Zed' : `Zed ${i + 1}`));
+    await withFixtures({ 'chats_list.json': envelope(rows) }, async (r) => {
+      expect(await r.resolve('zed')).toEqual({ jid: rows[10]!.jid, name: 'Zed', kind: 'group' });
+    });
+  });
+
+  it('finds an exact contact match in row 11 of a 50-row list', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) => contact(i + 1, i === 10 ? 'Zed' : `Zed ${i + 1}`));
+    await withFixtures({ 'contacts_search.json': envelope(rows) }, async (r) => {
+      expect(await r.resolve('zed')).toEqual({ jid: rows[10]!.jid, name: 'Zed', kind: 'user' });
+    }, { FAKE_WACLI_EMPTY: 'chats list' });
+  });
+
+  it('keeps only the first 10 candidates in the ambiguous_recipient payload', async () => {
+    const rows = Array.from({ length: 12 }, (_, i) => chat(i + 1, `Zed ${i + 1}`));
+    await withFixtures({ 'chats_list.json': envelope(rows) }, async (r) => {
+      const err = await r.resolve('zed').catch((e: unknown) => e) as { code: string; details: { candidates: Array<{ name: string }> } };
+      expect(err.code).toBe('ambiguous_recipient');
+      expect(err.details.candidates.map((c) => c.name)).toEqual(rows.slice(0, 10).map((c) => c.name));
     });
   });
 });
