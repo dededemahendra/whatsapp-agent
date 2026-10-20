@@ -1,7 +1,7 @@
 import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { decide, fileInsideRoots, isInsideRoot, matchesAllow, type DecideInput } from '../../src/policy/engine.js';
+import { decide, fileInsideRoots, isInsideRoot, matchesAllow, sameAllowTarget, type DecideInput } from '../../src/policy/engine.js';
 import { DEFAULT_POLICY, type Policy } from '../../src/policy/schema.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
@@ -31,6 +31,18 @@ describe('matchesAllow', () => {
     expect(matchesAllow(['Alice'], alice)).toBe(false);
     expect(matchesAllow(['+61 400 000 002', 'Bob'], alice)).toBe(false);
     expect(matchesAllow([], alice)).toBe(false);
+  });
+});
+
+describe('sameAllowTarget', () => {
+  it('treats spellings of one number, its JID forms, and exact text as the same target', () => {
+    expect(sameAllowTarget('+61 400 000 001', '61400000001')).toBe(true);
+    expect(sameAllowTarget('+61400000001', '61400000001@s.whatsapp.net')).toBe(true);
+    expect(sameAllowTarget('61400000001:7@s.whatsapp.net', '61400000001@S.WHATSAPP.NET')).toBe(true);
+    expect(sameAllowTarget('120363000000000001@g.us', '120363000000000001@g.us')).toBe(true);
+    expect(sameAllowTarget('+61 400 000 001', '+61 400 000 002')).toBe(false);
+    expect(sameAllowTarget('Alice', 'alice')).toBe(true);
+    expect(sameAllowTarget('Alice', '+61400000001')).toBe(false);
   });
 });
 

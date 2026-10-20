@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { AgentError } from '../errors.js';
 import { resolvePaths } from '../paths.js';
 import { readAudit, type AuditRecord } from '../policy/audit.js';
 
@@ -17,17 +18,28 @@ export function formatAudit(records: AuditRecord[]): string {
   return lines.join('\n') + '\n';
 }
 
+export function parseLimit(raw: string): number {
+  if (!/^[1-9]\d*$/.test(raw)) throw new AgentError('invalid_input', '--limit must be a positive whole number');
+  return Number(raw);
+}
+
+export function parseSince(raw: string): Date {
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) throw new AgentError('invalid_input', '--since must be YYYY-MM-DD (UTC midnight) or an RFC 3339 timestamp');
+  return d;
+}
+
 export function auditCommand(): Command {
   return new Command('audit')
     .description('Show what the agent sent or tried to send')
-    .option('-n, --limit <n>', 'number of records', '50')
-    .option('--since <date>', 'only records at or after this time (YYYY-MM-DD or RFC 3339)')
+    .option('-n, --limit <n>', 'number of records (a positive whole number)', '50')
+    .option('--since <date>', 'only records at or after this time (YYYY-MM-DD is UTC midnight, or RFC 3339)')
     .option('--tool <name>', 'filter by tool name')
     .option('--json', 'print JSON lines')
     .action(async (opts: { limit: string; since?: string; tool?: string; json?: boolean }) => {
       const records = await readAudit(resolvePaths().auditFile, {
-        limit: Number(opts.limit) || 50,
-        since: opts.since ? new Date(opts.since) : undefined,
+        limit: parseLimit(opts.limit),
+        since: opts.since ? parseSince(opts.since) : undefined,
         tool: opts.tool,
       });
       process.stdout.write(opts.json ? records.map((r) => JSON.stringify(r)).join('\n') + (records.length ? '\n' : '') : formatAudit(records));

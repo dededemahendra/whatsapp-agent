@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatAudit } from '../../src/ops/audit-cmd.js';
+import { formatAudit, parseLimit, parseSince } from '../../src/ops/audit-cmd.js';
 import { claudeMcpAddCommand, mcpConfigJson } from '../../src/ops/mcp-config.js';
 
 describe('audit formatting', () => {
@@ -14,6 +14,15 @@ describe('audit formatting', () => {
   });
   it('says so when empty', () => {
     expect(formatAudit([])).toBe('No audit records.\n');
+  });
+});
+
+describe('audit option parsing', () => {
+  it('rejects non-positive or non-numeric limits and unparseable dates', () => {
+    expect(parseLimit('5')).toBe(5);
+    for (const bad of ['0', '-1', 'abc', '1.5']) expect(() => parseLimit(bad)).toThrowError(expect.objectContaining({ code: 'invalid_input' }));
+    expect(parseSince('2026-10-20').toISOString()).toBe('2026-10-20T00:00:00.000Z');
+    for (const bad of ['garbage', '7d']) expect(() => parseSince(bad)).toThrowError(expect.objectContaining({ code: 'invalid_input' }));
   });
 });
 

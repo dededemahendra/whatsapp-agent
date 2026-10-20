@@ -54,6 +54,21 @@ export function matchesAllow(allow: string[], r: Resolved): boolean {
   return false;
 }
 
+/** True when two allowlist entries denote the same recipient: phones by digits, user JIDs by their number, other JIDs canonical, else exact text, all case-insensitive. */
+export function sameAllowTarget(a: string, b: string): boolean {
+  const key = (raw: string): string => {
+    const s = raw.trim();
+    const l = s.toLowerCase();
+    if (JID_RE.test(l)) {
+      const c = canonicalJid(l);
+      return c.endsWith('@s.whatsapp.net') ? `user:${jidUser(c)}` : `jid:${c}`;
+    }
+    if (looksLikePhone(s)) return `user:${digitsOf(s)}`;
+    return `text:${l}`;
+  };
+  return key(a) === key(b);
+}
+
 function deny(code: DenyCode, retryAfterSeconds?: number): Decision {
   const message = retryAfterSeconds === undefined
     ? DENY_MESSAGES[code]

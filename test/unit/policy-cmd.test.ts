@@ -21,14 +21,17 @@ describe('policy edits', () => {
     expect((await disableWrites(file)).writes.enabled).toBe(false);
   });
 
-  it('stores phone numbers as given, canonicalises JIDs, and dedupes', async () => {
+  it('dedupes and removes by target, not by spelling, and refuses national numbers', async () => {
     await allowRecipient(file, '+61 400 000 001');
-    await allowRecipient(file, '+61 400 000 001');
+    await allowRecipient(file, '+61400000001');
     await allowRecipient(file, '+61400000002:3@s.whatsapp.net');
     await allowRecipient(file, '61400000002@s.whatsapp.net');
     expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001', '61400000002@s.whatsapp.net']);
     await removeRecipient(file, '61400000002:9@s.whatsapp.net');
-    expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001']);
+    await removeRecipient(file, '61400000001');
+    expect((await loadPolicy(file)).writes.allow).toEqual([]);
+    await expect(removeRecipient(file, 'nobody')).rejects.toMatchObject({ code: 'not_found' });
+    await expect(allowRecipient(file, '0400 000 001')).rejects.toMatchObject({ code: 'invalid_input' });
   });
 
   it('resolves a name to its JID once and refuses names without a resolver or unsendable kinds', async () => {
@@ -59,5 +62,7 @@ describe('policy edits', () => {
     expect(text).toContain('confirm: always');
     expect(text).toContain('Alice (inert: not a phone number or JID)');
     expect(isInertEntry('+61 400 000 001')).toBe(false);
+    expect(isInertEntry('61400000001@S.WHATSAPP.NET')).toBe(false);
+    expect(isInertEntry('0400 000 001')).toBe(true);
   });
 });

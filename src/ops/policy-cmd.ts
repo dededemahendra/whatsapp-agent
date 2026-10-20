@@ -4,8 +4,9 @@ import path from 'node:path';
 import { Command } from 'commander';
 import { AgentError } from '../errors.js';
 import { resolvePaths } from '../paths.js';
+import { sameAllowTarget } from '../policy/engine.js';
 import { loadPolicy, savePolicy, type ConfirmMode, type Policy } from '../policy/schema.js';
-import { canonicalJid, createResolver, JID_RE, looksLikePhone, type Resolver } from '../wacli/resolve.js';
+import { canonicalJid, createResolver, digitsOf, JID_RE, looksLikePhone, type Resolver } from '../wacli/resolve.js';
 import { createRunner } from '../wacli/runner.js';
 
 async function edit(file: string, fn: (p: Policy) => Policy): Promise<Policy> {
@@ -17,35 +18,38 @@ async function edit(file: string, fn: (p: Policy) => Policy): Promise<Policy> {
 export const enableWrites = (file: string) => edit(file, (p) => ({ ...p, writes: { ...p.writes, enabled: true } }));
 export const disableWrites = (file: string) => edit(file, (p) => ({ ...p, writes: { ...p.writes, enabled: false } }));
 
-/** True when an allowlist entry is neither a phone number nor a JID, so it can never match (A18). */
+/** True when an allowlist entry is neither a phone number (international format) nor a JID, so it can never match (A18). */
 export function isInertEntry(entry: string): boolean {
   const e = entry.trim();
-  return !(JID_RE.test(e) || looksLikePhone(e));
+  return !(JID_RE.test(e.toLowerCase()) || (looksLikePhone(e) && !digitsOf(e).startsWith('0')));
 }
 
 /** Phone numbers are stored as given, JIDs canonicalised; a name is resolved once through wacli and stored as its JID. */
 export async function allowRecipient(file: string, entry: string, resolver?: Resolver): Promise<Policy> {
   const e = entry.trim();
   let stored: string;
-  if (JID_RE.test(e)) {
-    stored = canonicalJid(e);
+  if (JID_RE.test(e.toLowerCase())) {
+    stored = canonicalJid(e.toLowerCase());
   } else if (looksLikePhone(e)) {
+    if (digitsOf(e).startsWith('0')) {
+      throw new AgentError('invalid_input', `"${e}" looks like a national number. Use the international format with the country code, for example +61 400 000 001.`);
+    }
     stored = e;
   } else {
     if (!resolver) throw new AgentError('invalid_input', `"${e}" is not a phone number or JID. Names are looked up through wacli; pass the number or JID instead.`);
     const r = await resolver.resolve(e);
     if (r.kind !== 'user' && r.kind !== 'group') throw new AgentError('invalid_input', `"${e}" is a ${r.kind}, which cannot receive messages.`);
-    stored = r.jid;
+    stored = canonicalJid(r.jid);
   }
-  return edit(file, (p) => (p.writes.allow.some((a) => a.toLowerCase() === stored.toLowerCase())
+  return edit(file, (p) => (p.writes.allow.some((a) => sameAllowTarget(a, stored))
     ? p
     : { ...p, writes: { ...p.writes, allow: [...p.writes.allow, stored] } }));
 }
 
 export const removeRecipient = (file: string, entry: string) => edit(file, (p) => {
-  const e = entry.trim();
-  const target = (JID_RE.test(e) ? canonicalJid(e) : e).toLowerCase();
-  return { ...p, writes: { ...p.writes, allow: p.writes.allow.filter((a) => a.toLowerCase() !== target) } };
+  const kept = p.writes.allow.filter((a) => !sameAllowTarget(a, entry));
+  if (kept.length === p.writes.allow.length) throw new AgentError('not_found', `"${entry.trim()}" is not on the allowlist.`);
+  return { ...p, writes: { ...p.writes, allow: kept } };
 });
 
 export const setConfirm = (file: string, mode: ConfirmMode) => edit(file, (p) => ({ ...p, writes: { ...p.writes, confirm: mode } }));
