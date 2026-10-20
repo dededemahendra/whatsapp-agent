@@ -163,6 +163,9 @@ export async function runSetup(o: SetupOptions): Promise<boolean> {
       io.print('Restart it later with: whatsapp-agent daemon install');
       ready = false;
     }
+  } else if (o.flags.service === false && await serviceInstalled(o.service)) {
+    // --no-service was asked for, but a service from an earlier setup is there: it keeps running its old session, so say so rather than "skipped".
+    io.print('Left the installed service alone. Restart it with: whatsapp-agent daemon install');
   } else {
     const wantService = o.flags.service ?? (await io.ask('Install the sync daemon as a login service? Without it reads go stale and each send opens a fresh session.'));
     if (wantService) {

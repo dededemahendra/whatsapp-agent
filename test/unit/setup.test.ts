@@ -433,7 +433,41 @@ describe('runSetup restarts a service that is already installed', () => {
     const t2 = io({});
     expect(await runSetup({ io: t2.io, ...opts(), service: installedService(skipped), isGlobal: true, flags: { service: false } })).toBe(true);
     expect(skipped).toEqual([]);
-    expect(t2.out.join('\n')).toContain('Skipped the service');
+    const text = t2.out.join('\n');
+    expect(text).toContain('Left the installed service alone. Restart it with: whatsapp-agent daemon install');
+    expect(text).not.toContain('Skipped the service');
+    expect(text).not.toContain('Install it later');
+  });
+
+  it('keeps the skipped wording when --no-service is given and nothing is installed, running or not', async () => {
+    for (const status of [{ installed: false, running: null, detail: 'not installed' }, { installed: false, running: false, detail: 'not installed' }]) {
+      const calls: string[] = [];
+      const t = io({});
+      expect(await runSetup({ io: t.io, ...opts(), service: { ...service(calls), status: async () => status }, isGlobal: true, flags: { service: false } })).toBe(true);
+      expect(calls).toEqual([]);
+      const text = t.out.join('\n');
+      expect(text).toContain('Skipped the service. Install it later with: whatsapp-agent daemon install');
+      expect(text).not.toContain('Left the installed service alone');
+    }
+  });
+
+  it('treats a service whose status cannot be read as not installed with --no-service, so the skipped wording stands', async () => {
+    const calls: string[] = [];
+    const t = io({});
+    const unreadable = { ...service(calls), status: async (): Promise<never> => { throw new Error('launchctl is not answering'); } };
+    expect(await runSetup({ io: t.io, ...opts(), service: unreadable, isGlobal: true, flags: { service: false } })).toBe(true);
+    expect(t.out.join('\n')).toContain('Skipped the service. Install it later with: whatsapp-agent daemon install');
+  });
+
+  it('says the installed service was left alone whether it is running or stopped', async () => {
+    for (const running of [true, false, null]) {
+      const calls: string[] = [];
+      const t = io({});
+      const svc = { ...service(calls), status: async () => ({ installed: true, running, detail: 'installed' }) };
+      await runSetup({ io: t.io, ...opts(), service: svc, isGlobal: true, flags: { service: false } });
+      expect(calls).toEqual([]);
+      expect(t.out.join('\n')).toContain('Left the installed service alone. Restart it with: whatsapp-agent daemon install');
+    }
   });
 
   it('does not touch an installed service from a copy that is not a global install', async () => {
