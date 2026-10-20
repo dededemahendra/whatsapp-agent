@@ -6,6 +6,7 @@ import { registerContactTools } from './tools/contacts.js';
 import { registerGroupTools } from './tools/groups.js';
 import { registerMediaTool } from './tools/media.js';
 import { registerMessageTools } from './tools/messages.js';
+import { registerWriteTools } from './tools/send.js';
 import { registerStatusTool } from './tools/status.js';
 
 export const INSTRUCTIONS = [
@@ -27,5 +28,6 @@ export function createServer(deps: ServerDeps): McpServer {
   registerGroupTools(server, deps);
   registerMessageTools(server, deps);
   registerMediaTool(server, deps);
+  registerWriteTools(server, deps);
   return server;
 }
