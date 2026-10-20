@@ -4291,7 +4291,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Produces:
   - `interface ServiceStatus { installed: boolean; running: boolean | null; detail: string }`, `interface ServiceManager { install(): Promise<string>; uninstall(): Promise<void>; status(): Promise<ServiceStatus> }` (implemented in Task 16)
   - `interface DoctorReport { status: StatusInfo; wacli_bin: string; policy: PolicySummary; service: ServiceStatus | null; paths: { config_dir; data_dir; policy_file; audit_file; daemon_log }; problems: string[] }`, `collectDoctor(opts: { runner: Runner; policy: Policy; paths: Paths; service: ServiceManager | null; now: () => Date }): Promise<DoctorReport>`, `formatDoctor(r: DoctorReport): string`
-  - Policy edits (each loads, changes, saves, returns the new policy): `enableWrites(file)`, `disableWrites(file)`, `allowRecipient(file, entry)`, `removeRecipient(file, entry)`, `setConfirm(file, mode)`, `setGroups(file, on: boolean)`, `addFileRoot(file, dir)` (resolves to an absolute real path and requires an existing directory), `formatPolicy(p: Policy): string`
+  - Policy edits (each loads, changes, saves, returns the new policy): `enableWrites(file)`, `disableWrites(file)`, `allowRecipient(file, entry, resolver?)` (phone numbers stored as given, JIDs canonicalised, a name resolved once through the resolver and stored as its JID; names without a resolver and non-messageable kinds are `invalid_input`), `removeRecipient(file, entry)`, `setConfirm(file, mode)`, `setGroups(file, on: boolean)`, `addFileRoot(file, dir)` (expands a leading `~`, resolves to an absolute real path and requires an existing directory), `isInertEntry(entry): boolean`, `formatPolicy(p: Policy): string` (flags inert entries); `collectDoctor` lists inert allowlist entries as problems
   - `formatAudit(records: AuditRecord[]): string`
   - `claudeMcpAddCommand(): string`, `mcpConfigJson(): string`
   - commander builders `doctorCommand()`, `policyCommand()`, `auditCommand()`.
@@ -4301,17 +4301,21 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 `test/unit/policy-cmd.test.ts`:
 
 ```ts
-import { mkdir } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { addFileRoot, allowRecipient, disableWrites, enableWrites, formatPolicy, removeRecipient, setConfirm, setGroups } from '../../src/ops/policy-cmd.js';
-import { loadPolicy } from '../../src/policy/schema.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { addFileRoot, allowRecipient, disableWrites, enableWrites, formatPolicy, isInertEntry, removeRecipient, setConfirm, setGroups } from '../../src/ops/policy-cmd.js';
+import { DEFAULT_POLICY, loadPolicy, savePolicy } from '../../src/policy/schema.js';
+import type { Resolver } from '../../src/wacli/resolve.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 let tmp: string;
 let file: string;
 beforeEach(async () => { tmp = await makeTmp(); file = path.join(tmp, 'cfg', 'policy.json'); });
-afterEach(async () => { await removeTmp(tmp); });
+afterEach(async () => { await removeTmp(tmp); vi.unstubAllEnvs(); });
+
+const alice: Resolver = { resolve: async () => ({ jid: '61400000001@s.whatsapp.net', name: 'Alice', kind: 'user' }) };
+const channel: Resolver = { resolve: async () => ({ jid: '1@newsletter', name: 'News', kind: 'channel' }) };
 
 describe('policy edits', () => {
   it('enables and disables writes, persisting to disk', async () => {
@@ -4320,13 +4324,21 @@ describe('policy edits', () => {
     expect((await disableWrites(file)).writes.enabled).toBe(false);
   });
 
-  it('adds and removes allowlist entries without duplicates', async () => {
+  it('stores phone numbers as given, canonicalises JIDs, and dedupes', async () => {
     await allowRecipient(file, '+61 400 000 001');
     await allowRecipient(file, '+61 400 000 001');
-    await allowRecipient(file, 'Alice');
-    expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001', 'Alice']);
-    await removeRecipient(file, 'alice');
+    await allowRecipient(file, '+61400000002:3@s.whatsapp.net');
+    await allowRecipient(file, '61400000002@s.whatsapp.net');
+    expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001', '61400000002@s.whatsapp.net']);
+    await removeRecipient(file, '61400000002:9@s.whatsapp.net');
     expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001']);
+  });
+
+  it('resolves a name to its JID once and refuses names without a resolver or unsendable kinds', async () => {
+    await allowRecipient(file, 'Alice', alice);
+    expect((await loadPolicy(file)).writes.allow).toEqual(['61400000001@s.whatsapp.net']);
+    await expect(allowRecipient(file, 'Bob')).rejects.toMatchObject({ code: 'invalid_input' });
+    await expect(allowRecipient(file, 'News', channel)).rejects.toMatchObject({ code: 'invalid_input' });
   });
 
   it('sets confirm mode and groups', async () => {
@@ -4334,19 +4346,22 @@ describe('policy edits', () => {
     expect((await setGroups(file, true)).writes.groups).toBe(true);
   });
 
-  it('adds an existing directory as a file root, resolved to an absolute path', async () => {
+  it('adds an existing directory as a file root, resolved to a real absolute path, expanding a leading tilde', async () => {
     const dir = path.join(tmp, 'outbox');
     await mkdir(dir);
-    const p = await addFileRoot(file, dir);
-    expect(p.writes.fileRoots).toHaveLength(1);
-    expect(path.isAbsolute(p.writes.fileRoots[0]!)).toBe(true);
+    vi.stubEnv('HOME', tmp);
+    const p = await addFileRoot(file, '~/outbox');
+    expect(p.writes.fileRoots).toEqual([await realpath(dir)]);
     await expect(addFileRoot(file, path.join(tmp, 'missing'))).rejects.toMatchObject({ code: 'invalid_input' });
   });
 
-  it('formats a readable summary', async () => {
-    const text = formatPolicy(await enableWrites(file));
+  it('formats a readable summary and flags inert allowlist entries', async () => {
+    await savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, enabled: true, allow: ['+61 400 000 001', 'Alice'] } });
+    const text = formatPolicy(await loadPolicy(file));
     expect(text).toContain('writes: enabled');
     expect(text).toContain('confirm: always');
+    expect(text).toContain('Alice (inert: not a phone number or JID)');
+    expect(isInertEntry('+61 400 000 001')).toBe(false);
   });
 });
 ```
@@ -4470,6 +4485,7 @@ import { summarizePolicy, type PolicySummary } from '../policy/summary.js';
 import type { Runner } from '../wacli/runner.js';
 import { getStatus, type StatusInfo } from '../wacli/status.js';
 import { MIN_WACLI_VERSION } from '../version.js';
+import { isInertEntry } from './policy-cmd.js';
 import type { ServiceManager, ServiceStatus } from './service-types.js';
 
 export interface DoctorReport {
@@ -4502,6 +4518,9 @@ export async function collectDoctor(opts: { runner: Runner; policy: Policy; path
   }
   if (status.session_revoked) {
     problems.push('WhatsApp revoked the linked session. Run: whatsapp-agent setup');
+  }
+  for (const entry of opts.policy.writes.allow) {
+    if (isInertEntry(entry)) problems.push(`Allowlist entry "${entry}" is not a phone number or JID and never matches. Replace it with: whatsapp-agent policy allow <number or JID>`);
   }
   const service = opts.service ? await opts.service.status() : null;
   if (service && !service.installed) {
@@ -4551,11 +4570,14 @@ export function formatDoctor(r: DoctorReport): string {
 
 ```ts
 import { realpath, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
 import { AgentError } from '../errors.js';
 import { resolvePaths } from '../paths.js';
 import { loadPolicy, savePolicy, type ConfirmMode, type Policy } from '../policy/schema.js';
+import { canonicalJid, createResolver, JID_RE, looksLikePhone, type Resolver } from '../wacli/resolve.js';
+import { createRunner } from '../wacli/runner.js';
 
 async function edit(file: string, fn: (p: Policy) => Policy): Promise<Policy> {
   const next = fn(await loadPolicy(file));
@@ -4566,21 +4588,43 @@ async function edit(file: string, fn: (p: Policy) => Policy): Promise<Policy> {
 export const enableWrites = (file: string) => edit(file, (p) => ({ ...p, writes: { ...p.writes, enabled: true } }));
 export const disableWrites = (file: string) => edit(file, (p) => ({ ...p, writes: { ...p.writes, enabled: false } }));
 
-export const allowRecipient = (file: string, entry: string) => edit(file, (p) => {
+/** True when an allowlist entry is neither a phone number nor a JID, so it can never match (A18). */
+export function isInertEntry(entry: string): boolean {
   const e = entry.trim();
-  const exists = p.writes.allow.some((a) => a.toLowerCase() === e.toLowerCase());
-  return exists ? p : { ...p, writes: { ...p.writes, allow: [...p.writes.allow, e] } };
-});
+  return !(JID_RE.test(e) || looksLikePhone(e));
+}
 
-export const removeRecipient = (file: string, entry: string) => edit(file, (p) => ({
-  ...p, writes: { ...p.writes, allow: p.writes.allow.filter((a) => a.toLowerCase() !== entry.trim().toLowerCase()) },
-}));
+/** Phone numbers are stored as given, JIDs canonicalised; a name is resolved once through wacli and stored as its JID. */
+export async function allowRecipient(file: string, entry: string, resolver?: Resolver): Promise<Policy> {
+  const e = entry.trim();
+  let stored: string;
+  if (JID_RE.test(e)) {
+    stored = canonicalJid(e);
+  } else if (looksLikePhone(e)) {
+    stored = e;
+  } else {
+    if (!resolver) throw new AgentError('invalid_input', `"${e}" is not a phone number or JID. Names are looked up through wacli; pass the number or JID instead.`);
+    const r = await resolver.resolve(e);
+    if (r.kind !== 'user' && r.kind !== 'group') throw new AgentError('invalid_input', `"${e}" is a ${r.kind}, which cannot receive messages.`);
+    stored = r.jid;
+  }
+  return edit(file, (p) => (p.writes.allow.some((a) => a.toLowerCase() === stored.toLowerCase())
+    ? p
+    : { ...p, writes: { ...p.writes, allow: [...p.writes.allow, stored] } }));
+}
+
+export const removeRecipient = (file: string, entry: string) => edit(file, (p) => {
+  const e = entry.trim();
+  const target = (JID_RE.test(e) ? canonicalJid(e) : e).toLowerCase();
+  return { ...p, writes: { ...p.writes, allow: p.writes.allow.filter((a) => a.toLowerCase() !== target) } };
+});
 
 export const setConfirm = (file: string, mode: ConfirmMode) => edit(file, (p) => ({ ...p, writes: { ...p.writes, confirm: mode } }));
 export const setGroups = (file: string, on: boolean) => edit(file, (p) => ({ ...p, writes: { ...p.writes, groups: on } }));
 
 export async function addFileRoot(file: string, dir: string): Promise<Policy> {
-  const abs = path.resolve(dir);
+  const expanded = dir === '~' || dir.startsWith('~/') ? path.join(os.homedir(), dir.slice(1)) : dir;
+  const abs = path.resolve(expanded);
   let real: string;
   try {
     real = await realpath(abs);
@@ -4592,10 +4636,11 @@ export async function addFileRoot(file: string, dir: string): Promise<Policy> {
 }
 
 export function formatPolicy(p: Policy): string {
+  const allow = p.writes.allow.map((a) => (isInertEntry(a) ? `${a} (inert: not a phone number or JID)` : a));
   return [
     `writes: ${p.writes.enabled ? 'enabled' : 'disabled'}`,
     `confirm: ${p.writes.confirm}`,
-    `allowlist: ${p.writes.allow.length === 0 ? '(empty)' : p.writes.allow.join(', ')}`,
+    `allowlist: ${allow.length === 0 ? '(empty)' : allow.join(', ')}`,
     `groups: ${p.writes.groups ? 'on' : 'off'}`,
     `rate limit: ${p.writes.rateLimit.perHour} per hour, ${p.writes.rateLimit.minGapSeconds}s minimum gap`,
     `file roots: ${p.writes.fileRoots.length === 0 ? '(none; send_file is off)' : p.writes.fileRoots.join(', ')}`,
@@ -4610,7 +4655,11 @@ export function policyCommand(): Command {
   cmd.command('show').description('Print the current policy').action(async () => out(await loadPolicy(file())));
   cmd.command('enable').description('Allow write tools (sends still follow confirm, allowlist and rate limit)').action(async () => out(await enableWrites(file())));
   cmd.command('disable').description('Turn all write tools off').action(async () => out(await disableWrites(file())));
-  cmd.command('allow <recipient>').description('Add a phone number, JID or exact chat name to the allowlist').action(async (r: string) => out(await allowRecipient(file(), r)));
+  cmd.command('allow <recipient>').description('Add a phone number or JID to the allowlist; a name is looked up once and stored as its JID').action(async (r: string) => {
+    const policy = await loadPolicy(file());
+    const resolver = createResolver(createRunner({ bin: process.env.WHATSAPP_AGENT_WACLI_BIN || 'wacli', account: policy.account, baseEnv: process.env }));
+    out(await allowRecipient(file(), r, resolver));
+  });
   cmd.command('remove <recipient>').description('Remove an allowlist entry').action(async (r: string) => out(await removeRecipient(file(), r)));
   const set = cmd.command('set').description('Change a setting');
   set.command('confirm <mode>').description('always | unlisted | never').action(async (mode: string) => {
@@ -4713,7 +4762,7 @@ program.addCommand(auditCommand());
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/policy-cmd.test.ts test/unit/doctor.test.ts test/unit/audit-cmd.test.ts && pnpm typecheck && pnpm build && node bin/whatsapp-agent.mjs policy show`
-Expected: PASS (10 tests); `policy show` prints `writes: disabled` and the other lines from the defaults.
+Expected: PASS (11 tests); `policy show` prints `writes: disabled` and the other lines from the defaults.
 
 - [ ] **Step 5: Commit**
 
@@ -5888,9 +5937,11 @@ whatsapp-agent policy disable
 
 - `confirm always` (default): the agent's host shows you the recipient and the exact text, and nothing is sent until you tick confirm. Hosts that cannot show a form get a clear refusal instead.
 - `confirm unlisted`: allowlisted recipients send without a prompt; everyone else prompts.
-- `confirm never`: no prompts. Only sensible with a tight allowlist.
+- `confirm never`: no prompts at all. The allowlist is not consulted in this mode.
+- Allowlist entries are phone numbers or JIDs. `policy allow <name>` looks the name up once and stores the JID. Display names are never matched, because other people choose them.
 - Groups are refused until `set groups on`.
 - `send_file` is off until you add a folder.
+- Validation errors for malformed tool input come back from the MCP SDK as plain text; only tool-level errors carry the `{"error", "message"}` JSON shape.
 - Rate limit: 20 sends an hour and 5 seconds between sends by default.
 
 Changes take effect on the next tool call; no restart needed.
@@ -6042,6 +6093,10 @@ jobs:
           generate_release_notes: true
 ```
 
+- [ ] **Step 3b: Harden the CI workflow and align the Node types floor**
+
+In `.github/workflows/ci.yml` add `permissions:\n  contents: read` at the top level (after `on:`), and `fail-fast: false` under `strategy:` so one failing Node leg does not cancel the others. In `package.json` change `@types/node` to `"^22.20.5"` and run `pnpm install` so the lockfile follows; typecheck must stay clean (the code uses no Node 24-only APIs).
+
 - [ ] **Step 4: Write the opt-in smoke test**
 
 `test/smoke/real-wacli.test.ts`:
@@ -6085,7 +6140,7 @@ Expected: the tarball listing contains `bin/whatsapp-agent.mjs`, `dist/cli.js`, 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add README.md SKILL.md CHANGELOG.md .github/workflows/release.yml test/smoke
+git add README.md SKILL.md CHANGELOG.md .github/workflows/ci.yml .github/workflows/release.yml package.json pnpm-lock.yaml test/smoke
 git commit -m "docs: add README, agent skill, changelog, release workflow and smoke test
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
