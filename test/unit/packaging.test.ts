@@ -219,3 +219,20 @@ describe('bin/whatsapp-agent.mjs', () => {
     }
   });
 });
+
+describe('README', () => {
+  /** Line breaks and runs of spaces do not matter to a reader, so they do not matter here. */
+  const flat = (text: string): string => text.replace(/\s+/g, ' ');
+
+  it('says an attempted row is written before every write, not only before a send', async () => {
+    const readme = flat(await read('README.md'));
+    expect(readme).toContain('An `attempted` row is written before every write (a send, a reaction or a mark as read)');
+    expect(readme).toContain('If the `attempted` row cannot be written, the write is not made.');
+    expect(readme).not.toContain('A send is preceded by an `attempted` row');
+    expect(readme).toContain('A confirmation prompt that is never answered leaves no row.');
+  });
+
+  it('says a confirmation has to be answered within five minutes', async () => {
+    expect(flat(await read('README.md'))).toContain('A confirmation must be answered within five minutes. After that the host reports an error and the agent has to ask again.');
+  });
+});

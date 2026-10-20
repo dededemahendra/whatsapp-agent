@@ -10,8 +10,8 @@ describe('audit formatting', () => {
       { ts: '2026-10-20T10:01:00.000Z', tool: 'send_text', to_jid: '1@s.whatsapp.net', to_name: null, kind: 'user', outcome: 'denied', reason: 'rate_limited' },
     ]);
     const lines = text.trim().split('\n');
-    expect(lines[0]).toBe('2026-10-20T10:00:00.000Z  sent    send_text  Alice (1@s.whatsapp.net)  id=A  "hi"');
-    expect(lines[1]).toBe('2026-10-20T10:01:00.000Z  denied  send_text  1@s.whatsapp.net  rate_limited');
+    expect(lines[0]).toBe('2026-10-20T10:00:00.000Z  sent       send_text  Alice (1@s.whatsapp.net)  id=A  "hi"');
+    expect(lines[1]).toBe('2026-10-20T10:01:00.000Z  denied     send_text  1@s.whatsapp.net  rate_limited');
   });
   it('strips C0 and C1 control characters from names, text, paths and the other printed fields', () => {
     const text = formatAudit([
@@ -24,8 +24,8 @@ describe('audit formatting', () => {
     expect(text).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
     const lines = text.trim().split('\n');
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toBe('2026-10-20T10:00:00.000Z  sent    send_file  Al[31mice (1@s.whatsapp.net)  id=ID1  reason  "abc"  /tmp/xy.pdf  reaction=[2J+1');
-    expect(lines[1]).toBe('2026-10-20T10:01:00.000Z  denied  react  2@s.whatsapp.net  rate_limited');
+    expect(lines[0]).toBe('2026-10-20T10:00:00.000Z  sent       send_file  Al[31mice (1@s.whatsapp.net)  id=ID1  reason  "abc"  /tmp/xy.pdf  reaction=[2J+1');
+    expect(lines[1]).toBe('2026-10-20T10:01:00.000Z  denied     react  2@s.whatsapp.net  rate_limited');
   });
   it('prints an attempted row like any other outcome', () => {
     const text = formatAudit([
@@ -34,7 +34,7 @@ describe('audit formatting', () => {
     ]);
     expect(text.trim().split('\n')).toEqual([
       '2026-10-20T10:00:00.000Z  attempted  send_text  Alice (1@s.whatsapp.net)  "hi"',
-      '2026-10-20T10:00:01.000Z  sent    send_text  Alice (1@s.whatsapp.net)  id=A  "hi"',
+      '2026-10-20T10:00:01.000Z  sent       send_text  Alice (1@s.whatsapp.net)  id=A  "hi"',
     ]);
   });
   it('shows what the agent typed where a row has no JID, and (unresolved) only when nothing was recorded', () => {

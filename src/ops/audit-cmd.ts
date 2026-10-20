@@ -5,6 +5,9 @@ import { readAudit, type AuditRecord } from '../policy/audit.js';
 import { parsePositiveInt } from './args.js';
 import { stripControls } from './text.js';
 
+/** The longest outcome is `attempted`, and the outcome column is padded to it so that every row lines up. */
+const OUTCOME_WIDTH = 'attempted'.length;
+
 /** Names, text and paths in the log came from other people or from the agent, so control characters are removed before they reach a terminal. */
 export function formatAudit(records: AuditRecord[]): string {
   if (records.length === 0) return 'No audit records.\n';
@@ -14,7 +17,7 @@ export function formatAudit(records: AuditRecord[]): string {
     // A row written before the recipient was looked up has no JID; what the agent typed stands in for it.
     const typed = r.to_input ? stripControls(r.to_input) : '';
     const who = name ? `${name} (${jid})` : (jid ?? (typed || '(unresolved)'));
-    const parts = [stripControls(r.ts), stripControls(r.outcome).padEnd(6), stripControls(r.tool), who];
+    const parts = [stripControls(r.ts), stripControls(r.outcome).padEnd(OUTCOME_WIDTH), stripControls(r.tool), who];
     if (r.message_id) parts.push(`id=${stripControls(r.message_id)}`);
     if (r.reason) parts.push(stripControls(r.reason));
     if (r.text) parts.push(JSON.stringify(stripControls(r.text)));

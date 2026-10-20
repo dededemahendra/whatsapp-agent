@@ -93,6 +93,7 @@ whatsapp-agent policy disable
 - `confirm always` (default): the agent's host shows you the recipient and the exact text, and nothing is sent until you tick confirm. Hosts that cannot show a form get a clear refusal instead.
 - `confirm unlisted`: allowlisted recipients send without a prompt; everyone else prompts.
 - `confirm never`: no prompts at all. The allowlist is not consulted in this mode.
+- A confirmation must be answered within five minutes. After that the host reports an error and the agent has to ask again.
 - Allowlist entries are phone numbers or JIDs. `policy allow <name>` looks the name up once and stores the JID. Display names are never matched, because other people choose them.
 - Groups are refused until `set groups on`.
 - `send_file` is off until you add a folder.
@@ -114,7 +115,7 @@ whatsapp-agent audit --since 2026-10-01 --tool send_text
 whatsapp-agent audit --json     # one JSON record per line
 ```
 
-Every attempt is recorded, including refused ones, with recipient, outcome and the text that was sent. A send is preceded by an `attempted` row, written just before wacli is called, and followed by a `sent` or `failed` row. If the `attempted` row cannot be written, nothing is sent. An `attempted` row with nothing after it means the outcome is unknown, so check the chat. A confirmation prompt that is never answered leaves no row. The file is owner-only at `~/.local/share/whatsapp-agent/audit.jsonl`.
+Every attempt is recorded, including refused ones, with recipient, outcome and the text that was sent. An `attempted` row is written before every write (a send, a reaction or a mark as read), just before wacli is called, and is followed by a `sent` or `failed` row. If the `attempted` row cannot be written, the write is not made. An `attempted` row with nothing after it means the outcome is unknown, so check the chat. A confirmation prompt that is never answered leaves no row. The file is owner-only at `~/.local/share/whatsapp-agent/audit.jsonl`.
 
 ## Background sync
 
