@@ -1,6 +1,7 @@
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { AgentError } from '../../src/errors.js';
 import { createRateLimiter } from '../../src/policy/ratelimit.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
@@ -44,5 +45,48 @@ describe('rate limiter', () => {
     expect((await rl.snapshot(plus(4))).countLastHour).toBe(4);
     const leftovers = (await readdir(tmp)).filter((n) => n.endsWith('.tmp'));
     expect(leftovers).toEqual([]);
+  });
+
+  it('treats a file that is valid JSON of the wrong shape as empty, like a corrupt one', async () => {
+    const file = path.join(tmp, 'rl.json');
+    for (const body of ['null', '[]', '"text"', '42', '{"sends":"nope"}', '{}']) {
+      await writeFile(file, body);
+      expect((await createRateLimiter(file).snapshot(t0)).countLastHour).toBe(0);
+    }
+  });
+});
+
+describe('rate limiter when the state cannot be read', () => {
+  const isRoot = process.getuid?.() === 0;
+
+  it.skipIf(isRoot)('refuses to count when the file is not readable (EACCES), instead of starting from zero', async () => {
+    const file = path.join(tmp, 'rl.json');
+    await writeFile(file, JSON.stringify({ sends: [t0.toISOString()] }));
+    await chmod(file, 0o000);
+    try {
+      const rl = createRateLimiter(file);
+      const err = await rl.snapshot(plus(1)).catch((e: unknown) => e) as AgentError;
+      expect(err).toMatchObject({ code: 'invalid_input' });
+      expect(err.message.startsWith(`Could not read the rate-limit state at ${file}: `)).toBe(true);
+      expect(err.message).toContain('EACCES');
+      await expect(rl.record(plus(1))).rejects.toMatchObject({ code: 'invalid_input' });
+    } finally {
+      await chmod(file, 0o600);
+    }
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ sends: [t0.toISOString()] });
+  });
+
+  it('refuses to count when the path is a directory (EISDIR), and writes nothing', async () => {
+    const file = path.join(tmp, 'rl.json');
+    await mkdir(file);
+    const rl = createRateLimiter(file);
+    await expect(rl.snapshot(t0)).rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining(`Could not read the rate-limit state at ${file}: `) });
+    await expect(rl.record(t0)).rejects.toMatchObject({ code: 'invalid_input' });
+    expect((await readdir(tmp)).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('still starts empty when the file does not exist', async () => {
+    const rl = createRateLimiter(path.join(tmp, 'missing', 'rl.json'));
+    expect((await rl.snapshot(t0)).countLastHour).toBe(0);
   });
 });

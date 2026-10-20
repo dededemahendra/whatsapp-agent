@@ -1,5 +1,6 @@
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { AgentError } from '../errors.js';
 import { ensurePrivateDir } from '../paths.js';
 import type { RateSnapshot } from './engine.js';
 
@@ -10,14 +11,28 @@ export interface RateLimiter {
 
 const WINDOW_MS = 60 * 60 * 1000;
 
+/**
+ * Sends recorded in the last file write. A missing file and a file that is not valid JSON both mean "no sends yet"; any other failure to read it
+ * (permissions, a directory in its place) refuses the send, because counting from zero would let the agent past its own limit.
+ */
 async function readSends(file: string): Promise<number[]> {
+  let text: string;
   try {
-    const parsed = JSON.parse(await readFile(file, 'utf8')) as { sends?: unknown };
-    if (!Array.isArray(parsed.sends)) return [];
-    return parsed.sends.map((s) => new Date(String(s)).getTime()).filter((n) => Number.isFinite(n));
-  } catch {
-    return [];
+    text = await readFile(file, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw new AgentError('invalid_input', `Could not read the rate-limit state at ${file}: ${e instanceof Error ? e.message : String(e)}`);
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    if (e instanceof SyntaxError) return [];
+    throw e;
+  }
+  const sends = typeof parsed === 'object' && parsed !== null ? (parsed as { sends?: unknown }).sends : undefined;
+  if (!Array.isArray(sends)) return [];
+  return sends.map((s) => new Date(String(s)).getTime()).filter((n) => Number.isFinite(n));
 }
 
 async function writeSends(file: string, tmp: string, sends: number[]): Promise<void> {

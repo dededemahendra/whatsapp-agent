@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Policy } from '../../src/policy/schema.js';
@@ -113,6 +113,16 @@ describe('send_text', () => {
     expect(results.filter((r) => !r.isError)).toHaveLength(2);
     expect(results.filter((r) => r.isError && errorOf(r).error === 'rate_limited')).toHaveLength(2);
     expect(await sendArgv()).toHaveLength(2);
+  });
+
+  it('refuses a send when the rate-limit state cannot be read, instead of counting from zero', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    await mkdir(h.deps.paths.rateLimitFile, { recursive: true }); // a directory where the state file belongs
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBe(true);
+    expect(errorOf(r)).toMatchObject({ error: 'invalid_input', message: expect.stringContaining('Could not read the rate-limit state at') });
+    expect(await sendArgv()).toHaveLength(0);
+    expect(h.audits.at(-1)).toMatchObject({ tool: 'send_text', outcome: 'failed', reason: 'invalid_input' });
   });
 
   it('re-checks every rule when the confirmation answer arrives', async () => {
