@@ -35,6 +35,28 @@ describe('createRunner against the fake wacli', () => {
     expect(rec!.env.WACLI_READONLY).toBeUndefined();
   });
 
+  it('isolates WACLI_READONLY per mode even when the parent env sets it', async () => {
+    const r = createRunner({ bin: FAKE_WACLI, baseEnv: { ...fakeEnv({ FAKE_WACLI_LOG: log }), WACLI_READONLY: '1' } });
+    await r.write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi']);
+    await r.read(['doctor'], { env: { WACLI_READONLY: '0' } });
+    const recs = await readArgvLog(log);
+    expect(recs[0]!.env.WACLI_READONLY).toBeUndefined();
+    expect(recs[1]!.env.WACLI_READONLY).toBe('1');
+  });
+
+  it('marks a failed write as outcome-uncertain and leaves reads alone', async () => {
+    const failing = runner({ FAKE_WACLI_FAIL: '*|1|connection reset by peer' });
+    await expect(failing.write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.stringContaining('may have gone through'),
+      details: expect.objectContaining({ outcome_uncertain: true }),
+    });
+    await expect(failing.read(['doctor'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.not.stringContaining('may have gone through'),
+    });
+  });
+
   it('prefixes --account when configured', async () => {
     await runner({}, 'work').read(['doctor']);
     const [rec] = await readArgvLog(log);
@@ -95,5 +117,12 @@ describe('pure helpers', () => {
 
   it('classifyMessage maps not found', () => {
     expect(classifyMessage('message not found').code).toBe('not_found');
+  });
+
+  it('classifyMessage maps wacli deadline wording to timeout and keeps lock waits as store_locked', () => {
+    const e = classifyMessage('send text: context deadline exceeded');
+    expect(e.code).toBe('timeout');
+    expect(e.message).toContain('may have gone through');
+    expect(classifyMessage('timed out waiting for store lock after 5s').code).toBe('store_locked');
   });
 });

@@ -7,6 +7,7 @@ export const READ_TIMEOUT_MS = 30_000;
 export const WRITE_TIMEOUT_MS = 90_000;
 export const MEDIA_TIMEOUT_MS = 120_000;
 export const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+export const SEND_UNCERTAIN = 'The outcome is uncertain: read the chat before retrying, because the message may have gone through.';
 
 export interface RunOptions {
   timeoutMs?: number;
@@ -87,6 +88,9 @@ export function classifyMessage(message: string, stderr = ''): AgentError {
   if (m.includes('store is locked') || m.includes('waiting for store lock')) {
     return new AgentError('store_locked', 'The wacli store is locked by another process. Check `whatsapp-agent daemon status`.');
   }
+  if (m.includes('deadline exceeded') || m.includes('timed out') || m.includes('timeout')) {
+    return new AgentError('timeout', `wacli reported a timeout: ${message}. If this was a send, read the chat before retrying: the message may have gone through.`);
+  }
   if (m.includes('not found') || m.includes('no such') || m.includes('unknown chat')) {
     return new AgentError('not_found', message);
   }
@@ -119,6 +123,12 @@ export function classifyFailure(code: number, stdout: string, stderr: string): A
   return classifyMessage(line || `wacli exited with code ${code}`, stderr);
 }
 
+function markUncertain(err: AgentError): AgentError {
+  if (err.code !== 'wacli_error' && err.code !== 'timeout') return err;
+  const message = err.message.includes('may have gone through') ? err.message : `${err.message} ${SEND_UNCERTAIN}`;
+  return new AgentError(err.code, message, { ...err.details, outcome_uncertain: true });
+}
+
 export function createRunner(cfg: RunnerConfig): Runner {
   const spawn = cfg.spawn ?? defaultSpawn;
   const prefix = cfg.account ? ['--account', cfg.account] : [];
@@ -132,8 +142,16 @@ export function createRunner(cfg: RunnerConfig): Runner {
     if (mode === 'read') env.WACLI_READONLY = '1';
     else delete env.WACLI_READONLY;
     debug('wacli', { mode, command: args.slice(0, 2).join(' ') });
-    const r = await spawn(cfg.bin, full, env, timeoutMs);
-    if (r.code !== 0) throw classifyFailure(r.code, r.stdout, r.stderr);
+    let r: SpawnResult;
+    try {
+      r = await spawn(cfg.bin, full, env, timeoutMs);
+    } catch (e) {
+      throw mode === 'write' && e instanceof AgentError ? markUncertain(e) : e;
+    }
+    if (r.code !== 0) {
+      const err = classifyFailure(r.code, r.stdout, r.stderr);
+      throw mode === 'write' ? markUncertain(err) : err;
+    }
     return parseEnvelope<T>(r.stdout, r.stderr);
   }
 
