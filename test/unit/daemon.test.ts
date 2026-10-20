@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildSyncArgs, parseEventLine, startSupervisor } from '../../src/ops/daemon.js';
+import { buildSyncArgs, describeStderrLine, parseEventLine, startSupervisor } from '../../src/ops/daemon.js';
 import { DEFAULT_POLICY } from '../../src/policy/schema.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, removeTmp } from '../helpers/fake.js';
 
@@ -28,7 +28,7 @@ describe('parseEventLine', () => {
 });
 
 describe('startSupervisor', () => {
-  function start(script: string, over: { sleeps?: number[] } = {}) {
+  function start(script: string, over: { sleeps?: number[]; sleep?: (ms: number) => Promise<void> } = {}) {
     const lines: string[] = [];
     const sleeps: number[] = over.sleeps ?? [];
     const handle = startSupervisor({
@@ -38,7 +38,7 @@ describe('startSupervisor', () => {
       env: fakeEnv({ FAKE_WACLI_SYNC: script, FAKE_WACLI_SYNC_COUNTER: path.join(tmp, 'counter') }),
       log: (l) => lines.push(l),
       backoff: { initialMs: 50, maxMs: 200, resetAfterMs: 60_000 },
-      sleep: async (ms) => { sleeps.push(ms); },
+      sleep: over.sleep ?? (async (ms) => { sleeps.push(ms); }),
     });
     return { handle, lines, sleeps };
   }
@@ -52,12 +52,19 @@ describe('startSupervisor', () => {
   });
 
   it('crash restarts with backoff, doubling to the cap, then stop() ends it', async () => {
-    const { handle, sleeps, lines } = start('connected;crash|crash|crash|connected;sleep:30000');
-    await new Promise((r) => setTimeout(r, 2500));
-    expect(sleeps).toEqual([50, 100, 200]);
+    const { handle, sleeps, lines } = start('connected;crash|crash|crash|crash|connected;sleep:30000');
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(sleeps).toEqual([50, 100, 200, 200]);
     await handle.stop();
     await expect(handle.done).resolves.toBe('stopped');
     expect(lines.some((l) => l.includes('restarting in 50 ms'))).toBe(true);
+  });
+
+  it('stop() interrupts a backoff sleep', async () => {
+    const { handle } = start('crash', { sleep: () => new Promise(() => {}) });
+    await new Promise((r) => setTimeout(r, 400));
+    await handle.stop();
+    await expect(handle.done).resolves.toBe('stopped');
   });
 
   it('forwards non-JSON stderr lines to the log', async () => {
@@ -66,5 +73,16 @@ describe('startSupervisor', () => {
     await handle.stop();
     await handle.done;
     expect(lines.some((l) => l.endsWith('connected; history sync 12%'))).toBe(true);
+  });
+});
+
+describe('describeStderrLine', () => {
+  it('logs event names only, redacts other json, strips control characters and caps length', () => {
+    expect(describeStderrLine('{"event":"connected","data":{"Text":"secret"},"ts":1}')).toEqual({ text: 'event=connected', event: 'connected' });
+    expect(describeStderrLine('{"event":"bad\\nname","ts":1}')).toEqual({ text: 'event=(unrecognised name)', event: null });
+    expect(describeStderrLine('{"type":"message","Text":"secret"}').text).toBe('(unrecognised json line, 34 chars)');
+    expect(describeStderrLine('warn \u001b[31mred\u001b[0m').text).toBe('warn [31mred[0m');
+    expect(describeStderrLine('x'.repeat(600)).text).toBe(`${'x'.repeat(500)}... (600 chars)`);
+    expect(describeStderrLine('   ').text).toBeNull();
   });
 });

@@ -28,6 +28,26 @@ export function parseEventLine(line: string): { event: string; data?: unknown } 
   }
 }
 
+const EVENT_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+const MAX_PLAIN_LINE = 500;
+
+function safeLine(line: string): string {
+  const stripped = line.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e]/g, '');
+  return stripped.length > MAX_PLAIN_LINE ? `${stripped.slice(0, MAX_PLAIN_LINE)}... (${stripped.length} chars)` : stripped;
+}
+
+/** What one stderr line contributes to the log: never a message body, never an unbounded line. */
+export function describeStderrLine(line: string): { text: string | null; event: string | null } {
+  const ev = parseEventLine(line);
+  if (ev) {
+    return EVENT_NAME.test(ev.event) ? { text: `event=${ev.event}`, event: ev.event } : { text: 'event=(unrecognised name)', event: null };
+  }
+  const t = line.trim();
+  if (t === '') return { text: null, event: null };
+  if (t.startsWith('{')) return { text: `(unrecognised json line, ${line.length} chars)`, event: null };
+  return { text: safeLine(line), event: null };
+}
+
 export interface SupervisorOptions {
   bin: string;
   account: string | null;
@@ -56,6 +76,8 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
   let child: ChildProcess | null = null;
   let stopping = false;
   let delay = backoff.initialMs;
+  let requestStop: () => void = () => {};
+  const stopRequested = new Promise<void>((resolve) => { requestStop = resolve; });
 
   const runOnce = (): Promise<{ code: number | null; loggedOut: boolean; startedAt: number }> =>
     new Promise((resolve) => {
@@ -65,13 +87,9 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
       child = spawn(opts.bin, args, { env: { ...(opts.env ?? process.env), NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
       const rl = readline.createInterface({ input: child.stderr! });
       rl.on('line', (line) => {
-        const ev = parseEventLine(line);
-        if (ev) {
-          if (ev.event === 'logged_out') loggedOut = true;
-          opts.log(`${stamp()} event=${ev.event}`);
-        } else if (line.trim() !== '') {
-          opts.log(`${stamp()} ${line}`);
-        }
+        const d = describeStderrLine(line);
+        if (d.event === 'logged_out') loggedOut = true;
+        if (d.text !== null) opts.log(`${stamp()} ${d.text}`);
       });
       child.stdout?.on('data', () => { /* sync prints nothing useful on stdout */ });
       child.on('error', (err) => opts.log(`${stamp()} spawn error: ${err.message}`));
@@ -88,7 +106,7 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
       }
       if (now() - r.startedAt >= backoff.resetAfterMs) delay = backoff.initialMs;
       opts.log(`${stamp()} sync exited with code ${r.code ?? 'signal'}; restarting in ${delay} ms`);
-      await sleep(delay);
+      await Promise.race([sleep(delay), stopRequested]);
       delay = Math.min(delay * 2, backoff.maxMs);
       if (stopping) return 'stopped';
     }
@@ -98,6 +116,8 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
     done,
     async stop() {
       stopping = true;
+      requestStop();
+      opts.log(`${stamp()} stop requested`);
       const c = child;
       if (c && c.exitCode === null) {
         c.kill('SIGTERM');
