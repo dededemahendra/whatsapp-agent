@@ -2144,6 +2144,8 @@ describe('matchesAllow', () => {
     expect(matchesAllow(['61400000001@s.whatsapp.net'], alice)).toBe(true);
     expect(matchesAllow(['+61 400 000 001'], alice)).toBe(true);
     expect(matchesAllow(['alice'], alice)).toBe(true);
+    expect(matchesAllow(['+61400000001@s.whatsapp.net'], alice)).toBe(true);
+    expect(matchesAllow(['61400000001:7@s.whatsapp.net'], alice)).toBe(true);
     expect(matchesAllow(['+61 400 000 002', 'Bob'], alice)).toBe(false);
     expect(matchesAllow([], alice)).toBe(false);
   });
@@ -2236,7 +2238,7 @@ Expected: FAIL, module not found.
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { Resolved } from '../wacli/resolve.js';
-import { digitsOf, looksLikePhone } from '../wacli/resolve.js';
+import { canonicalJid, digitsOf, JID_RE, looksLikePhone } from '../wacli/resolve.js';
 import type { Policy } from './schema.js';
 
 export type WriteTool = 'send_text' | 'send_file' | 'react' | 'mark_read';
@@ -2281,7 +2283,7 @@ export function matchesAllow(allow: string[], r: Resolved): boolean {
   for (const raw of allow) {
     const e = raw.trim();
     if (e === '') continue;
-    if (e.toLowerCase() === r.jid.toLowerCase()) return true;
+    if (JID_RE.test(e) && canonicalJid(e).toLowerCase() === r.jid.toLowerCase()) return true;
     if (looksLikePhone(e) && digitsOf(e) === user) return true;
     if (r.name && e.toLowerCase() === r.name.toLowerCase()) return true;
   }
