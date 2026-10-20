@@ -25,6 +25,18 @@ describe('doctor', () => {
     expect(text).toContain('wacli: 0.22.0');
     expect(text).toContain('paired: yes (+61400000000)');
     expect(text).toContain('writes: disabled');
+    expect(text).toContain('last activity: none');
+    expect(text).not.toMatch(/heartbeat/i);
+  });
+
+  it('labels the heartbeat file last activity and shows its age', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const store = path.join(tmp, 'store');
+    await mkdir(store, { recursive: true });
+    await writeFile(path.join(store, 'HEARTBEAT'), '2026-10-20T10:00:00Z\n');
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: store }) });
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date('2026-10-20T10:00:30Z') });
+    expect(formatDoctor(r)).toContain('last activity: 2026-10-20T10:00:00.000Z (30s ago)');
   });
 
   it('reports a missing wacli as a problem', async () => {

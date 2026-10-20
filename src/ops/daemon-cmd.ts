@@ -2,18 +2,44 @@ import { Command } from 'commander';
 import { AgentError } from '../errors.js';
 import { ensureDirs, resolvePaths, type Paths } from '../paths.js';
 import { loadPolicy } from '../policy/schema.js';
+import { createRunner, type Runner } from '../wacli/runner.js';
+import { getStatus } from '../wacli/status.js';
 import { startSupervisor } from './daemon.js';
 import { isGlobalInstall, serviceManagerForThisMachine, servicePathsForThisMachine } from './service.js';
 import type { ServiceManager } from './service-types.js';
 import { followFile, tailFile } from './tail.js';
+import { formatAge } from './text.js';
 
 export interface DaemonCommandDeps {
   /** Builds the service manager; tests pass a stub so no launchctl or systemctl runs. */
   service?: (paths: Paths) => ServiceManager | null;
+  /** Builds the runner `status` reads wacli through; tests pass one over the fake. */
+  makeRunner?: (account: string | null) => Runner;
+  now?: () => Date;
 }
+
+const realRunner = (account: string | null): Runner =>
+  createRunner({ bin: process.env.WHATSAPP_AGENT_WACLI_BIN || 'wacli', account, baseEnv: process.env });
 
 export function daemonCommand(deps: DaemonCommandDeps = {}): Command {
   const serviceFor = deps.service ?? serviceManagerForThisMachine;
+  const makeRunner = deps.makeRunner ?? realRunner;
+  const now = deps.now ?? ((): Date => new Date());
+
+  /** What wacli's store says about recent activity, or null when the store cannot be read through wacli. */
+  async function storeActivity(paths: Paths): Promise<{ activity: string; sync: string } | null> {
+    try {
+      const account = await loadPolicy(paths.policyFile).then((p) => p.account, () => null);
+      const status = await getStatus(makeRunner(account), now());
+      if (status.store_dir === null) return null;
+      return {
+        activity: status.heartbeat_age_seconds === null ? 'none' : `${formatAge(status.heartbeat_age_seconds)} ago`,
+        sync: status.last_sync_at ?? 'unknown',
+      };
+    } catch {
+      return null;
+    }
+  }
   const cmd = new Command('daemon').description('Keep the WhatsApp mirror in sync in the background');
 
   cmd.command('run').description('Run the sync supervisor in the foreground (service installers call this)').action(async () => {
@@ -54,11 +80,13 @@ export function daemonCommand(deps: DaemonCommandDeps = {}): Command {
     process.stdout.write(before.installed ? 'Service removed.\n' : 'No service was installed.\n');
   });
 
-  cmd.command('status').description('Show whether the service is installed and running').action(async () => {
+  cmd.command('status').description('Show whether the service is installed and running, and when wacli last did anything').action(async () => {
     const paths = resolvePaths();
     const manager = serviceFor(paths);
     const s = manager ? await manager.status() : { installed: false, running: null, detail: 'not supported on this platform' };
     process.stdout.write(`${s.detail}\n`);
+    const store = await storeActivity(paths);
+    if (store) process.stdout.write(`last activity: ${store.activity}\nlast sync: ${store.sync}\n`);
     if (!manager || !s.running) process.exitCode = 1;
   });
 

@@ -37,6 +37,18 @@ describe('whatsapp_status', () => {
     });
   });
 
+  it('calls the heartbeat last activity in its descriptions, never a liveness signal', async () => {
+    h = await makeHarness();
+    const { tools } = await h.client.listTools();
+    const tool = tools.find((t) => t.name === 'whatsapp_status')!;
+    const props = (tool.outputSchema as { properties: Record<string, { description?: string }> }).properties;
+    const texts = [tool.description ?? '', props.heartbeat_at?.description ?? '', props.heartbeat_age_seconds?.description ?? ''];
+    for (const t of texts) {
+      expect(t.toLowerCase()).toContain('last activity');
+      expect(t.toLowerCase()).not.toMatch(/heartbeat|liveness|alive|health check/);
+    }
+  });
+
   it('flags an old wacli', async () => {
     h = await makeHarness({ env: { FAKE_WACLI_VERSION: '0.21.0' } });
     const r = await h.call('whatsapp_status');

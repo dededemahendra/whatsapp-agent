@@ -47,7 +47,7 @@ Read tools, always available:
 
 | Tool | Purpose |
 | --- | --- |
-| `whatsapp_status` | Pairing state, last sync, daemon heartbeat, policy summary |
+| `whatsapp_status` | Pairing state, last sync, last activity, policy summary |
 | `list_chats` | Chats with unread counts |
 | `read_messages` | One page of a conversation, oldest first, with a cursor for older pages |
 | `search_messages` | Full-text search with chat, sender, media and date filters |

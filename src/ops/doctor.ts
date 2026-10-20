@@ -78,7 +78,7 @@ export function formatDoctor(r: DoctorReport): string {
     `paired: ${s.authenticated ? `yes${s.phone ? ` (${s.phone})` : ''}` : 'no'}`,
     `connection: ${s.connection_state ?? 'unknown'}`,
     `last sync: ${s.last_sync_at ?? 'unknown'}`,
-    `daemon heartbeat: ${s.heartbeat_at ? `${s.heartbeat_at} (${s.heartbeat_age_seconds}s ago)` : 'none'}`,
+    `last activity: ${s.heartbeat_at ? `${s.heartbeat_at} (${s.heartbeat_age_seconds}s ago)` : 'none'}`,
     `daemon service: ${r.service ? r.service.detail : 'not supported on this platform'}`,
     `store: ${s.store_dir ?? 'unknown'} (${s.counts.chats ?? '?'} chats, ${s.counts.messages ?? '?'} messages)`,
     r.policy
