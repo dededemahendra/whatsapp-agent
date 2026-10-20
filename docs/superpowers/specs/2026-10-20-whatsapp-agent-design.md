@@ -680,3 +680,8 @@ overrides the earlier text where they differ.
   `get_group` returns `participant_count` and `participants` from the local
   snapshot only (see A5). Schema-validation failures raised by the MCP SDK are
   plain-text error results, not the `{"error", "message"}` JSON shape.
+- A20. `download_media` inlines an image block only for `image/png`,
+  `image/jpeg`, `image/gif` and `image/webp`, only when the file's magic
+  bytes match the declared type, and only when the size is above 0 and at or
+  below `media.inlineImageMaxBytes`. The path and metadata are returned
+  regardless.
