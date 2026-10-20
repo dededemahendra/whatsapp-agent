@@ -5137,7 +5137,7 @@ program.addCommand(daemonCommand());
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/daemon.test.ts && pnpm typecheck`
-Expected: PASS (6 tests). The restart test waits 2.5 s.
+Expected: PASS (5 tests). The restart test waits 2.5 s.
 
 - [ ] **Step 5: Commit**
 
