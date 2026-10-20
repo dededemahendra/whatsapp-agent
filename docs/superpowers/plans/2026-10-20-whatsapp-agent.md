@@ -5214,8 +5214,9 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 import { appendFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createServiceManager, isGlobalInstall, launchdPlist, launchdPlistPath, systemdUnit, systemdUnitPath, type ServicePaths } from '../../src/ops/service.js';
+import { createServiceManager, isGlobalInstall, launchdPlist, launchdPlistPath, servicePathsForThisMachine, systemdUnit, systemdUnitPath, type ServicePaths } from '../../src/ops/service.js';
 import { followFile, tailFile } from '../../src/ops/tail.js';
+import { resolvePaths } from '../../src/paths.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 const sp: ServicePaths = {
@@ -5230,6 +5231,10 @@ describe('isGlobalInstall', () => {
     expect(isGlobalInstall('/Users/u/.cache/dlx-9f8e/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
     expect(isGlobalInstall('/Users/u/Developer/whatsapp-agent/dist/cli.js', {})).toBe(false);
     expect(isGlobalInstall('/Users/u/Developer/whatsapp-agent/dist/cli.js', { WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE: '1' })).toBe(true);
+    expect(isGlobalInstall('/Users/u/Library/Caches/pnpm/dlx/abc123/1700000000-1/node_modules/.pnpm/whatsapp-agent@0.1.0/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
+    expect(isGlobalInstall('/home/u/.cache/pnpm/dlx/abc123/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
+    expect(isGlobalInstall('/private/tmp/bunx-501-whatsapp-agent@latest/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
+    expect(isGlobalInstall('/Users/u/Library/pnpm/global/5/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(true);
   });
 });
 
@@ -5252,6 +5257,14 @@ describe('templates', () => {
     expect(unit).toContain('Environment=WHATSAPP_AGENT_WACLI_BIN=/opt/homebrew/bin/wacli');
     expect(unit).toContain('Restart=on-failure');
     expect(systemdUnitPath('/home/u')).toBe('/home/u/.config/systemd/user/whatsapp-agent.service');
+  });
+
+  it('servicePathsForThisMachine pins the resolved config and data dirs into the service environment', () => {
+    const paths = resolvePaths({ XDG_CONFIG_HOME: '/mnt/cfg', XDG_DATA_HOME: '/mnt/data' }, '/home/u');
+    const sp = servicePathsForThisMachine(paths, { WHATSAPP_AGENT_WACLI_BIN: '/opt/wacli' });
+    expect(sp.env).toEqual({ WHATSAPP_AGENT_CONFIG_DIR: '/mnt/cfg/whatsapp-agent', WHATSAPP_AGENT_DATA_DIR: '/mnt/data/whatsapp-agent' });
+    expect(sp.wacliBin).toBe('/opt/wacli');
+    expect(sp.dataDir).toBe('/mnt/data/whatsapp-agent');
   });
 });
 
@@ -5382,7 +5395,7 @@ export function platformOf(p: NodeJS.Platform = process.platform): Platform {
 export function isGlobalInstall(cliPath: string, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE === '1') return true;
   const p = cliPath.split(path.sep).join('/');
-  if (/\/(_npx|dlx-[^/]+|\.pnpm-store|\.cache)\//.test(p)) return false;
+  if (/\/(_npx|dlx(-[^/]+)?|\.pnpm-store|\.cache|Caches|bunx-[^/]+)\//.test(p)) return false;
   return /\/node_modules\/whatsapp-agent\//.test(p);
 }
 
@@ -5542,9 +5555,8 @@ export const realFs: ServiceFs = {
 };
 
 export function servicePathsForThisMachine(paths: Paths, env: NodeJS.ProcessEnv = process.env): ServicePaths {
-  const extra: Record<string, string> = {};
-  if (env.WHATSAPP_AGENT_CONFIG_DIR) extra.WHATSAPP_AGENT_CONFIG_DIR = env.WHATSAPP_AGENT_CONFIG_DIR;
-  if (env.WHATSAPP_AGENT_DATA_DIR) extra.WHATSAPP_AGENT_DATA_DIR = env.WHATSAPP_AGENT_DATA_DIR;
+  /** Always pinned: a login service does not inherit the installer's shell (XDG variables included). */
+  const extra: Record<string, string> = { WHATSAPP_AGENT_CONFIG_DIR: paths.configDir, WHATSAPP_AGENT_DATA_DIR: paths.dataDir };
   return {
     nodePath: process.execPath,
     cliPath: fileURLToPath(new URL('../cli.js', import.meta.url)),
@@ -5657,7 +5669,7 @@ export function daemonCommand(): Command {
     const manager = serviceManagerForThisMachine(paths);
     const s = manager ? await manager.status() : { installed: false, running: null, detail: 'not supported on this platform' };
     process.stdout.write(`${s.detail}\n`);
-    if (manager && !s.running) process.exitCode = 1;
+    if (!manager || !s.running) process.exitCode = 1;
   });
 
   cmd.command('logs').description('Show the daemon log').option('-n, --lines <n>', 'lines to show', '100').option('-f, --follow', 'keep printing new lines').action(async (opts: { lines: string; follow?: boolean }) => {
@@ -5676,7 +5688,7 @@ export function daemonCommand(): Command {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/service.test.ts && pnpm typecheck && pnpm build && node bin/whatsapp-agent.mjs daemon status`
-Expected: PASS (10 tests); `daemon status` prints `not installed` and exits 1.
+Expected: PASS (11 tests); `daemon status` prints `not installed` and exits 1.
 
 - [ ] **Step 5: Commit**
 
