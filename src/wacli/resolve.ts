@@ -25,21 +25,49 @@ export function canonicalJid(jid: string): string {
   return `${user}@s.whatsapp.net`;
 }
 
-export type PickResult = { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Resolved[] };
+export type MatchField = 'name' | 'alias' | 'system_name';
+/** What pickUnique takes: a resolution plus, for contacts, the other names it answers to. */
+export type Matchable = Resolved & { alias?: string | null; system_name?: string | null };
+/** A candidate in an ambiguous_recipient error. `matched_on` says which name matched, and appears for contacts only. */
+export type Candidate = Resolved & { matched_on?: MatchField };
+export type PickResult = { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Candidate[] };
 
-export function pickUnique(candidates: Resolved[], input: string): PickResult {
-  if (candidates.length === 0) return { kind: 'none' };
-  const needle = input.trim().toLowerCase();
-  const exact = candidates.filter((c) => (c.name ?? '').trim().toLowerCase() === needle);
-  if (exact.length === 1) return { kind: 'one', value: exact[0]! };
-  if (candidates.length === 1) {
-    const only = candidates[0]!;
-    return (only.name ?? '').toLowerCase().includes(needle) ? { kind: 'one', value: only } : { kind: 'none' };
+const fold = (s: string): string => s.trim().toLowerCase();
+
+/** The names a candidate answers to, folded: its display name first, then alias and system name. */
+function namesOf(c: Matchable): Array<[MatchField, string]> {
+  const fields: Array<[MatchField, string | null | undefined]> = [['name', c.name], ['alias', c.alias], ['system_name', c.system_name]];
+  const names: Array<[MatchField, string]> = [];
+  for (const [field, value] of fields) {
+    const v = fold(value ?? '');
+    if (v !== '') names.push([field, v]);
   }
-  return { kind: 'many', candidates: candidates.slice(0, 10) };
+  return names;
 }
 
-function ambiguous(input: string, candidates: Resolved[]): AgentError {
+const plain = (c: Matchable): Resolved => ({ jid: c.jid, name: c.name, kind: c.kind });
+
+/** Contacts get a label naming the field that matched: an exact match first, else the first name that contains the input. */
+function labelled(c: Matchable, needle: string): Candidate {
+  if (c.alias === undefined && c.system_name === undefined) return plain(c);
+  const names = namesOf(c);
+  const hit = names.find(([, v]) => v === needle) ?? names.find(([, v]) => v.includes(needle));
+  return hit ? { ...plain(c), matched_on: hit[0] } : plain(c);
+}
+
+export function pickUnique(candidates: Matchable[], input: string): PickResult {
+  if (candidates.length === 0) return { kind: 'none' };
+  const needle = fold(input);
+  const exact = candidates.filter((c) => namesOf(c).some(([, v]) => v === needle));
+  if (exact.length === 1) return { kind: 'one', value: plain(exact[0]!) };
+  if (candidates.length === 1) {
+    const only = candidates[0]!;
+    return namesOf(only).some(([, v]) => v.includes(needle)) ? { kind: 'one', value: plain(only) } : { kind: 'none' };
+  }
+  return { kind: 'many', candidates: candidates.slice(0, 10).map((c) => labelled(c, needle)) };
+}
+
+function ambiguous(input: string, candidates: Candidate[]): AgentError {
   return new AgentError('ambiguous_recipient',
     `"${input}" matches ${candidates.length} chats or contacts. Ask the person which one, or pass the JID.`,
     { candidates });
@@ -71,7 +99,9 @@ export function createResolver(runner: Runner): Resolver {
     if (fromChats.kind === 'many') throw ambiguous(input, fromChats.candidates);
 
     const contacts = asList(await runner.read<WacliContact[] | null>(['contacts', 'search', '--limit=10', '--', input]));
-    const fromContacts = pickUnique(contacts.map((c) => ({ jid: canonicalJid(c.jid), name: nonEmpty(c.name) ?? nonEmpty(c.alias), kind: 'user' as const })), input);
+    const fromContacts = pickUnique(contacts.map((c) => ({
+      jid: canonicalJid(c.jid), name: nonEmpty(c.name) ?? nonEmpty(c.alias), kind: 'user' as const, alias: nonEmpty(c.alias), system_name: nonEmpty(c.system_name),
+    })), input);
     if (fromContacts.kind === 'one') return fromContacts.value;
     if (fromContacts.kind === 'many') throw ambiguous(input, fromContacts.candidates);
     throw new AgentError('not_found', `No chat or contact matches "${input}". Pass a phone number or JID.`);
