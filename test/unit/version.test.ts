@@ -18,6 +18,24 @@ describe('version', () => {
     expect(compareVersions('1.0.0', '0.22.0')).toBeGreaterThan(0);
   });
 
+  it('compares the patch component', () => {
+    expect(compareVersions('0.22.1', '0.22.0')).toBeGreaterThan(0);
+    expect(compareVersions('0.22.0', '0.22.1')).toBeLessThan(0);
+    expect(compareVersions('0.22.10', '0.22.9')).toBeGreaterThan(0);
+  });
+
+  it('accepts versions above the minimum in the patch, minor and major position', () => {
+    expect(meetsMinimum('0.22.1')).toBe(true);
+    expect(meetsMinimum('0.23.0')).toBe(true);
+    expect(meetsMinimum('1.0.0')).toBe(true);
+  });
+
+  it('reads a pre-release tag as its release, because parseVersion keeps only the three numbers', () => {
+    expect(parseVersion('0.22.0-rc1')).toBe('0.22.0');
+    expect(meetsMinimum(parseVersion('0.22.0-rc1'))).toBe(true);
+    expect(meetsMinimum(parseVersion('0.21.9-rc1'))).toBe(false);
+  });
+
   it('checks the minimum', () => {
     expect(MIN_WACLI_VERSION).toBe('0.22.0');
     expect(meetsMinimum('0.22.0')).toBe(true);
