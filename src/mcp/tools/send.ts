@@ -7,6 +7,7 @@ import { debug } from '../../log.js';
 import type { AuditRecord } from '../../policy/audit.js';
 import { DENY_MESSAGES, decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
 import type { Resolved } from '../../wacli/resolve.js';
+import { SEND_UNCERTAIN, type RunOptions } from '../../wacli/runner.js';
 import type { WacliChatStateResult, WacliSendResult } from '../../wacli/shape.js';
 import {
   clientCanConfirm, confirmationRequired, filePrompt, fileState, reactPrompt, reactState, readAnswer, textPrompt, textState,
@@ -59,6 +60,23 @@ export function drainInFlight(timeoutMs: number): Promise<void> {
   });
 }
 
+/** How far a call got. `sent` is set once wacli has run to the end, or may have: whatever fails after that is reported as uncertain. */
+interface Progress { sent: boolean }
+
+const UNCERTAIN_REASON = ' (outcome uncertain, may have been delivered)';
+const isUncertain = (e: unknown): boolean => e instanceof AgentError && e.details.outcome_uncertain === true;
+
+/** The error with the uncertain wording and flag, unless it has them already. A plain error becomes a wacli_error, as toToolError would make it. */
+function asUncertain(e: unknown): AgentError {
+  const err = e instanceof AgentError ? e : new AgentError('wacli_error', e instanceof Error ? e.message : String(e));
+  if (isUncertain(err)) return err;
+  const message = err.message.includes('may have gone through') ? err.message : `${err.message.replace(/[\s.]+$/, '')}. ${SEND_UNCERTAIN}`;
+  return new AgentError(err.code, message, { ...err.details, outcome_uncertain: true });
+}
+
+/** The id wacli reported, or an empty string when its answer carries none. */
+const idOf = (res: Partial<WacliSendResult> | null | undefined): string => (typeof res?.id === 'string' ? res.id : '');
+
 /** What a file send will read: where the file really is, how big it is and when it last changed. Null when it cannot be found. */
 async function fileFacts(file: string): Promise<Pick<FileSend, 'realPath' | 'size' | 'mtimeMs'> | null> {
   try {
@@ -77,12 +95,22 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     client: server.server.getClientVersion()?.name,
   });
 
-  /** Audit failures never change a tool result: a completed send must not be reported as failed. */
+  /** Rows for denials and failures: the result already says what happened, so a row that cannot be written changes nothing. */
   async function record(rec: AuditRecord): Promise<void> {
     try {
       await deps.audit(rec);
     } catch (e) {
       debug('audit append failed', { tool: rec.tool, outcome: rec.outcome, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  /** A row that has to be written, the attempted row before a send and the sent row after it. `ifLost` is added to the message when it cannot be. */
+  async function mustRecord(rec: AuditRecord, ifLost = ''): Promise<void> {
+    try {
+      await deps.audit(rec);
+    } catch (e) {
+      const why = (e instanceof Error ? e.message : String(e)).replace(/[\s.]+$/, '');
+      throw new AgentError('invalid_input', `Could not write the audit log at ${deps.paths.auditFile}: ${why}.${ifLost}`);
     }
   }
 
@@ -107,15 +135,25 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   }
 
   /**
-   * Writes the row that says a send is about to be handed to wacli. Unlike the rows that follow, this one is required: when it cannot be
-   * written the send does not happen, so nothing leaves unrecorded. (It comes before the send, so it never hides one that happened.)
+   * Writes the row that says a send is about to be handed to wacli. When it cannot be written the send does not happen, so nothing leaves
+   * unrecorded. It comes before the send, so it never hides one that happened.
    */
-  async function attempt(tool: WriteTool, recipient: Resolved, extra: Partial<AuditRecord>): Promise<void> {
+  const attempt = (tool: WriteTool, recipient: Resolved, extra: Partial<AuditRecord>): Promise<void> =>
+    mustRecord({ ...base(tool, recipient), outcome: 'attempted', ...extra }, ' Nothing was sent.');
+
+  /**
+   * Hands the message to wacli. A failure the runner reports keeps the runner's own verdict: it marks the doubtful ones uncertain and gives
+   * the rest (not paired, store locked, a flag wacli does not know, a spawn that never started, a NUL byte) a definite code. Once this
+   * returns, or ends in something that is not a runner error, whatever fails next is uncertain.
+   */
+  async function write<T>(progress: Progress, argv: string[], opts?: RunOptions): Promise<T> {
     try {
-      await deps.audit({ ...base(tool, recipient), outcome: 'attempted', ...extra });
+      const res = await deps.runner.write<T>(argv, opts);
+      progress.sent = true;
+      return res;
     } catch (e) {
-      const why = (e instanceof Error ? e.message : String(e)).replace(/[\s.]+$/, '');
-      throw new AgentError('invalid_input', `Could not write the audit log at ${deps.paths.auditFile}: ${why}. Nothing was sent.`);
+      if (!(e instanceof AgentError)) progress.sent = true;
+      throw e;
     }
   }
 
@@ -125,9 +163,12 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     return denied(tool, null, { kind: 'deny', code: 'writes_disabled', message: DENY_MESSAGES.writes_disabled }, extra);
   }
 
-  async function failed(tool: WriteTool, recipient: Resolved | null, e: unknown, extra: Partial<AuditRecord>): Promise<CallToolResult> {
-    await record({ ...base(tool, recipient), outcome: 'failed', reason: e instanceof AgentError ? e.code : 'error', ...extra });
-    return toToolError(e);
+  async function failed(progress: Progress, tool: WriteTool, recipient: Resolved | null, e: unknown, extra: Partial<AuditRecord>): Promise<CallToolResult> {
+    const error = progress.sent ? asUncertain(e) : e;
+    const uncertain = isUncertain(error);
+    const code = error instanceof AgentError ? error.code : 'error';
+    await record({ ...base(tool, recipient), outcome: 'failed', reason: uncertain ? `${code}${UNCERTAIN_REASON}` : code, ...(uncertain ? { uncertain: true } : {}), ...extra });
+    return toToolError(error);
   }
 
   server.registerTool(
@@ -149,6 +190,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     async (a, ctx): Promise<CallToolResult | InputRequiredResult> => {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
+      const progress: Progress = { sent: false };
       try {
         const off = await switchedOff('send_text', { text: a.message });
         if (off) return off;
@@ -165,11 +207,11 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         for (const m of a.mentions ?? []) argv.push(`--mention=${m}`);
         if (a.link_preview === false) argv.push('--no-preview');
         await attempt('send_text', recipient, { text: a.message });
-        const res = await deps.runner.write<WacliSendResult>(argv);
-        await record({ ...base('send_text', recipient), outcome: 'sent', message_id: res.id, text: a.message });
-        return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
+        const id = idOf(await write<Partial<WacliSendResult> | null>(progress, argv));
+        await mustRecord({ ...base('send_text', recipient), outcome: 'sent', ...(id ? { message_id: id } : {}), text: a.message });
+        return ok({ sent: true, message_id: id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
-        return await failed('send_text', recipient, e, { text: a.message });
+        return await failed(progress, 'send_text', recipient, e, { text: a.message });
       } finally {
         release?.();
       }
@@ -194,6 +236,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     async (a, ctx): Promise<CallToolResult | InputRequiredResult> => {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
+      const progress: Progress = { sent: false };
       try {
         const off = await switchedOff('send_file', { file: a.path });
         if (off) return off;
@@ -213,11 +256,11 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         if (a.filename) argv.push(`--filename=${a.filename}`);
         const env: Record<string, string> = policy.writes.fileRoots.length > 0 ? { WACLI_MEDIA_ROOTS: policy.writes.fileRoots.join(path.delimiter) } : {};
         await attempt('send_file', recipient, { file: a.path, text: a.caption });
-        const res = await deps.runner.write<WacliSendResult>(argv, { env });
-        await record({ ...base('send_file', recipient), outcome: 'sent', message_id: res.id, file: a.path, text: a.caption });
-        return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
+        const id = idOf(await write<Partial<WacliSendResult> | null>(progress, argv, { env }));
+        await mustRecord({ ...base('send_file', recipient), outcome: 'sent', ...(id ? { message_id: id } : {}), file: a.path, text: a.caption });
+        return ok({ sent: true, message_id: id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
-        return await failed('send_file', recipient, e, { file: a.path });
+        return await failed(progress, 'send_file', recipient, e, { file: a.path });
       } finally {
         release?.();
       }
@@ -241,6 +284,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     async (a, ctx): Promise<CallToolResult | InputRequiredResult> => {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
+      const progress: Progress = { sent: false };
       try {
         const off = await switchedOff('react', { reaction: a.reaction, message_id: a.message_id });
         if (off) return off;
@@ -254,11 +298,11 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const argv = ['send', 'react', `--to=${recipient.jid}`, `--id=${a.message_id}`, `--reaction=${a.reaction}`];
         if (a.sender) argv.push(`--sender=${a.sender}`);
         await attempt('react', recipient, { reaction: a.reaction, message_id: a.message_id });
-        const res = await deps.runner.write<WacliSendResult>(argv);
-        await record({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
-        return ok({ sent: true, message_id: res.id, to: recipient });
+        const id = idOf(await write<Partial<WacliSendResult> | null>(progress, argv));
+        await mustRecord({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
+        return ok({ sent: true, message_id: id, to: recipient });
       } catch (e) {
-        return await failed('react', recipient, e, { reaction: a.reaction, message_id: a.message_id });
+        return await failed(progress, 'react', recipient, e, { reaction: a.reaction, message_id: a.message_id });
       } finally {
         release?.();
       }
@@ -277,6 +321,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     async (a, ctx): Promise<CallToolResult> => {
       let recipient: Resolved | null = null;
       let release: (() => void) | null = null;
+      const progress: Progress = { sent: false }; // marking a chat read can be repeated, so a failure here is never uncertain
       try {
         const off = await switchedOff('mark_read', {});
         if (off) return off;
@@ -286,10 +331,10 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         release = hold();
         await attempt('mark_read', recipient, {});
         await deps.runner.write<WacliChatStateResult>(['chats', 'mark-read', `--chat=${recipient.jid}`], { idempotent: true });
-        await record({ ...base('mark_read', recipient), outcome: 'sent' });
+        await mustRecord({ ...base('mark_read', recipient), outcome: 'sent' });
         return ok({ ok: true, chat: recipient });
       } catch (e) {
-        return await failed('mark_read', recipient, e, {});
+        return await failed(progress, 'mark_read', recipient, e, {});
       } finally {
         release?.();
       }

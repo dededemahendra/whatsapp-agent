@@ -1,8 +1,10 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { AgentError } from '../../src/errors.js';
 import type { Policy } from '../../src/policy/schema.js';
-import { fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
+import { createRunner, SEND_UNCERTAIN } from '../../src/wacli/runner.js';
+import { FAKE_WACLI, fakeEnv, fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
 import { errorOf, makeHarness, stubWrite, type Harness } from '../helpers/harness.js';
 
 let h: Harness;
@@ -152,19 +154,6 @@ describe('send_text', () => {
     expect(await sendArgv()).toHaveLength(0);
   });
 
-  it('reports a completed send as sent even when the audit log stops working after the send', async () => {
-    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
-    const write = h.deps.audit;
-    h.deps.audit = async (rec) => {
-      if (rec.outcome === 'attempted') return write(rec);
-      throw new Error('ENOSPC: no space left on device');
-    };
-    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
-    expect(r.isError).toBeFalsy();
-    expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0001' });
-    expect(await sendArgv()).toHaveLength(1);
-  });
-
   it('reports an ambiguous recipient and a wacli failure as failed audits', async () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
     expect(errorOf(await h.call('send_text', { to: 'a', message: 'x' })).error).toBe('ambiguous_recipient');
@@ -172,7 +161,7 @@ describe('send_text', () => {
     await h.close();
     h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|usync failed' } });
     expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'x' })).error).toBe('wacli_error');
-    expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'wacli_error' });
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'wacli_error (outcome uncertain, may have been delivered)', uncertain: true });
   });
 });
 
@@ -350,7 +339,7 @@ describe('the attempted row', () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|usync failed' } });
     expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('wacli_error');
     expect(rows()).toEqual(['attempted', 'failed']);
-    expect(h.audits[1]).toMatchObject({ outcome: 'failed', reason: 'wacli_error' });
+    expect(h.audits[1]).toMatchObject({ outcome: 'failed', reason: 'wacli_error (outcome uncertain, may have been delivered)', uncertain: true });
   });
 
   it('precedes every kind of write', async () => {
@@ -445,5 +434,202 @@ describe('the attempted row', () => {
     const t0 = Date.now();
     await drainInFlight(1500);
     expect(Date.now() - t0).toBeLessThan(700);
+  });
+});
+
+describe('a failure after the write has been handed to wacli is uncertain', () => {
+  const rows = () => h.audits.map((a) => a.outcome);
+  const SUFFIX = ' (outcome uncertain, may have been delivered)';
+  const never = enabled({ confirm: 'never', rateLimit: { perHour: 50, minGapSeconds: 0 } });
+
+  it.each([[{}], [null], [undefined], [{ id: 42 }], ['3EB0']])('treats an answer of %j without a usable id as a send with no id, not as a failure', async (answer) => {
+    h = await makeHarness({ policy: never });
+    stubWrite(h, async () => answer);
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({ sent: true, message_id: '', to: { jid: '61400000001@s.whatsapp.net' } });
+    expect(rows()).toEqual(['attempted', 'sent']);
+    expect(h.audits[1]).not.toHaveProperty('message_id');
+  });
+
+  it('does the same for a reaction and a file', async () => {
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      const file = path.join(outbox, 'report.pdf');
+      await writeFile(file, 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox], rateLimit: { perHour: 50, minGapSeconds: 0 } }) });
+      stubWrite(h, async () => null);
+      const react = await h.call('react', { chat: 'Alice', message_id: 'MSG1', reaction: '👍' });
+      expect(react.isError).toBeFalsy();
+      expect(react.structuredContent).toMatchObject({ sent: true, message_id: '' });
+      const sent = await h.call('send_file', { to: 'Alice', path: file });
+      expect(sent.isError).toBeFalsy();
+      expect(sent.structuredContent).toMatchObject({ sent: true, message_id: '' });
+      expect(h.audits.find((a) => a.tool === 'react' && a.outcome === 'sent')).toMatchObject({ message_id: 'MSG1', reaction: '👍' });
+    } finally {
+      await removeTmp(outbox);
+    }
+  });
+
+  it('tells the agent a timeout is uncertain and records the row as uncertain', async () => {
+    h = await makeHarness({ policy: never, env: { FAKE_WACLI_FAIL: 'send text|1|deadline exceeded' } });
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBe(true);
+    expect(errorOf(r)).toMatchObject({ error: 'timeout', message: expect.stringContaining('may have gone through'), outcome_uncertain: true });
+    expect(rows()).toEqual(['attempted', 'failed']);
+    expect(h.audits[1]).toMatchObject({ outcome: 'failed', reason: `timeout${SUFFIX}`, uncertain: true, text: 'hello' });
+  });
+
+  it('does the same for a wacli_error from a write', async () => {
+    h = await makeHarness({ policy: never, env: { FAKE_WACLI_FAIL: 'send text|1|connection reset by peer' } });
+    const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+    expect(e).toMatchObject({ error: 'wacli_error', message: expect.stringContaining(SEND_UNCERTAIN), outcome_uncertain: true });
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: `wacli_error${SUFFIX}`, uncertain: true });
+  });
+
+  it('wraps a plain error that comes out of the write, because wacli may have run', async () => {
+    h = await makeHarness({ policy: never });
+    stubWrite(h, async () => { throw new Error('socket hang up'); });
+    const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+    expect(e).toMatchObject({ error: 'wacli_error', message: `socket hang up. ${SEND_UNCERTAIN}`, outcome_uncertain: true });
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: `wacli_error${SUFFIX}`, uncertain: true });
+  });
+
+  it('wraps a failure that happens once the write has returned, such as reading the answer', async () => {
+    h = await makeHarness({ policy: never });
+    stubWrite(h, async () => ({ get id(): string { throw new Error('boom'); } }));
+    const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+    expect(e).toMatchObject({ error: 'wacli_error', message: `boom. ${SEND_UNCERTAIN}`, outcome_uncertain: true });
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', uncertain: true });
+  });
+
+  it('tells the agent the outcome is uncertain when the audit log fails after a successful send', async () => {
+    h = await makeHarness({ policy: never });
+    const write = h.deps.audit;
+    h.deps.audit = async (rec) => {
+      if (rec.outcome === 'sent') throw new Error('ENOSPC: no space left on device');
+      return write(rec);
+    };
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBe(true);
+    const e = errorOf(r);
+    expect(e).toMatchObject({ error: 'invalid_input', outcome_uncertain: true });
+    expect(e.message).toContain('Could not write the audit log at');
+    expect(e.message).toContain('ENOSPC: no space left on device');
+    expect(e.message).toContain(SEND_UNCERTAIN);
+    expect(e.message).not.toContain('Nothing was sent');
+    expect(await sendArgv()).toHaveLength(1);
+    expect(rows()).toEqual(['attempted', 'failed']);
+    expect(h.audits[1]).toMatchObject({ outcome: 'failed', reason: `invalid_input${SUFFIX}`, uncertain: true });
+  });
+
+  it('still answers when the audit log is gone altogether after the send', async () => {
+    h = await makeHarness({ policy: never });
+    const write = h.deps.audit;
+    h.deps.audit = async (rec) => {
+      if (rec.outcome === 'attempted') return write(rec);
+      throw new Error('EIO: i/o error');
+    };
+    const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+    expect(e).toMatchObject({ error: 'invalid_input', outcome_uncertain: true });
+    expect(rows()).toEqual(['attempted']);
+  });
+
+  it('leaves an error from before the spawn alone: a NUL byte reaches the agent unchanged and nothing is marked uncertain', async () => {
+    h = await makeHarness({ policy: never });
+    const r = await h.call('send_text', { to: 'Alice', message: 'null\u0000byte' });
+    expect(r.isError).toBe(true);
+    const e = errorOf(r);
+    expect(e).toEqual({ error: 'invalid_input', message: 'Input must not contain NUL characters.' });
+    expect(rows()).toEqual(['attempted', 'failed']);
+    expect(h.audits[1]).toMatchObject({ outcome: 'failed', reason: 'invalid_input' });
+    expect(h.audits[1]).not.toHaveProperty('uncertain');
+    expect(rows()).not.toContain('sent');
+    expect(await sendArgv()).toHaveLength(0);
+  });
+
+  it('leaves a wacli that is too old for a flag alone', async () => {
+    h = await makeHarness({ policy: never, env: { FAKE_WACLI_FAIL: 'send text|1|Error: unknown flag: --timeout' } });
+    const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+    expect(e).toMatchObject({ error: 'wacli_too_old', message: expect.stringContaining('older than the minimum') });
+    expect(e).not.toHaveProperty('outcome_uncertain');
+    expect(e.message).not.toContain('uncertain');
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'wacli_too_old' });
+    expect(h.audits.at(-1)).not.toHaveProperty('uncertain');
+  });
+
+  it('leaves a spawn that never started alone', async () => {
+    const dir = await makeTmp('wa-noexec-');
+    try {
+      const copy = path.join(dir, 'wacli');
+      await copyFile(FAKE_WACLI, copy);
+      await chmod(copy, 0o644);
+      const broken = createRunner({ bin: copy, baseEnv: fakeEnv() });
+      h = await makeHarness({ policy: never });
+      stubWrite(h, (args, opts) => broken.write(args, opts));
+      const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+      expect(e).toMatchObject({ error: 'wacli_error', spawn_code: expect.stringMatching(/^E(ACCES|PERM)$/) });
+      expect(e).not.toHaveProperty('outcome_uncertain');
+      expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'wacli_error' });
+      expect(h.audits.at(-1)).not.toHaveProperty('uncertain');
+    } finally {
+      await removeTmp(dir);
+    }
+  });
+
+  it.each([
+    ['not authenticated; run `wacli auth`', 'not_authenticated'],
+    ['store is locked by another process', 'store_locked'],
+    ['chat not found', 'not_found'],
+  ])('leaves a definite refusal from wacli alone: %s', async (message, code) => {
+    h = await makeHarness({ policy: never, env: { FAKE_WACLI_FAIL: `send text|1|${message}` } });
+    const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+    expect(e.error).toBe(code);
+    expect(e).not.toHaveProperty('outcome_uncertain');
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: code });
+    expect(h.audits.at(-1)).not.toHaveProperty('uncertain');
+  });
+
+  it('leaves a failure before the write alone: an unreadable rate-limit state and a missing attempted row', async () => {
+    h = await makeHarness({ policy: never });
+    await mkdir(h.deps.paths.rateLimitFile, { recursive: true });
+    const first = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+    expect(first).toMatchObject({ error: 'invalid_input' });
+    expect(first).not.toHaveProperty('outcome_uncertain');
+    expect(rows()).toEqual(['failed']);
+    await h.close();
+
+    h = await makeHarness({ policy: never });
+    h.deps.audit = async () => { throw new Error('ENOSPC'); };
+    const second = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+    expect(second).toMatchObject({ error: 'invalid_input', message: expect.stringContaining('Nothing was sent.') });
+    expect(second).not.toHaveProperty('outcome_uncertain');
+  });
+
+  it('never calls a failed mark_read uncertain, whether wacli or the audit log fails', async () => {
+    h = await makeHarness({ policy: never, env: { FAKE_WACLI_FAIL: 'chats mark-read|1|connection reset by peer' } });
+    const wacli = errorOf(await h.call('mark_read', { chat: 'Alice' }));
+    expect(wacli).toMatchObject({ error: 'wacli_error' });
+    expect(wacli).not.toHaveProperty('outcome_uncertain');
+    expect(h.audits.at(-1)).not.toHaveProperty('uncertain');
+    await h.close();
+
+    h = await makeHarness({ policy: never });
+    const write = h.deps.audit;
+    h.deps.audit = async (rec) => {
+      if (rec.outcome === 'sent') throw new Error('ENOSPC');
+      return write(rec);
+    };
+    const audit = errorOf(await h.call('mark_read', { chat: 'Alice' }));
+    expect(audit).toMatchObject({ error: 'invalid_input' });
+    expect(audit).not.toHaveProperty('outcome_uncertain');
+    expect(audit.message).not.toContain('uncertain');
+  });
+
+  it('wraps an AgentError thrown after the write too, whatever its code', async () => {
+    h = await makeHarness({ policy: never });
+    stubWrite(h, async () => ({ get id(): string { throw new AgentError('not_found', 'late surprise'); } }));
+    const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
+    expect(e).toMatchObject({ error: 'not_found', message: `late surprise. ${SEND_UNCERTAIN}`, outcome_uncertain: true });
   });
 });

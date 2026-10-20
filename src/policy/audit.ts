@@ -11,6 +11,8 @@ export interface AuditRecord {
   /** `attempted` is written just before wacli is called and is followed by `sent` or `failed`; one with nothing after it means the outcome is unknown. */
   outcome: 'attempted' | 'sent' | 'denied' | 'failed';
   reason?: string;
+  /** True on a failed row whose send may still have been delivered. The reason says so too. */
+  uncertain?: boolean;
   message_id?: string;
   text?: string;
   file?: string;
