@@ -37,17 +37,22 @@ describe('audit formatting', () => {
       '2026-10-20T10:00:01.000Z  sent       send_text  Alice (1@s.whatsapp.net)  id=A  "hi"',
     ]);
   });
-  it('shows what the agent typed where a row has no JID, and (unresolved) only when nothing was recorded', () => {
+  it('labels what the agent typed on a row with no JID as unresolved, so it cannot be read as a resolved name', () => {
     const base = { ts: '2026-10-20T10:00:00.000Z', tool: 'send_text', to_jid: null, to_name: null, kind: null } as const;
     const lines = formatAudit([
       { ...base, outcome: 'denied', reason: 'writes_disabled', to_input: 'Dave', text: 'hi' },
       { ...base, outcome: 'failed', reason: 'ambiguous_recipient', to_input: "Dave's Plumbing" },
       { ...base, outcome: 'denied', reason: 'writes_disabled' },
     ]).trim().split('\n');
-    expect(lines[0]).toContain('  send_text  Dave  writes_disabled  "hi"');
-    expect(lines[0]).not.toContain('(unresolved)');
-    expect(lines[1]).toContain("  send_text  Dave's Plumbing  ambiguous_recipient");
-    expect(lines[2]).toContain('  send_text  (unresolved)  writes_disabled');
+    expect(lines[0]).toBe('2026-10-20T10:00:00.000Z  denied     send_text  Dave (unresolved)  writes_disabled  "hi"');
+    expect(lines[1]).toBe("2026-10-20T10:00:00.000Z  failed     send_text  Dave's Plumbing (unresolved)  ambiguous_recipient");
+    expect(lines[2]).toBe('2026-10-20T10:00:00.000Z  denied     send_text  (unresolved)  writes_disabled');
+  });
+
+  it('prints a bare (unresolved) when the input is empty once its controls are stripped', () => {
+    const base = { ts: '2026-10-20T10:00:00.000Z', tool: 'react', to_jid: null, to_name: null, kind: null, outcome: 'denied' } as const;
+    const lines = formatAudit([{ ...base, to_input: '' }, { ...base, to_input: '\u0007\u001b' }]).trim().split('\n');
+    expect(lines).toEqual(Array(2).fill('2026-10-20T10:00:00.000Z  denied     react  (unresolved)'));
   });
 
   it('prefers the JID to the input when a row has both, and strips controls from the input it prints', () => {
@@ -58,8 +63,14 @@ describe('audit formatting', () => {
     ]).trim().split('\n');
     expect(lines[0]).toContain('  send_text  1@s.whatsapp.net');
     expect(lines[0]).not.toContain('ignored');
-    expect(lines[1]).toContain('  send_text  Da[2Jve');
+    expect(lines[0]).not.toContain('(unresolved)');
+    expect(lines[1]).toContain('  send_text  Da[2Jve (unresolved)');
     expect(lines[1]).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+  });
+
+  it('leaves a row with a name and a JID exactly as it was', () => {
+    const text = formatAudit([{ ts: '2026-10-20T10:00:00.000Z', tool: 'send_text', to_jid: '1@s.whatsapp.net', to_name: 'Alice', kind: 'user', outcome: 'denied', reason: 'groups_disabled' }]);
+    expect(text).toBe('2026-10-20T10:00:00.000Z  denied     send_text  Alice (1@s.whatsapp.net)  groups_disabled\n');
   });
 
   it('says so when empty', () => {
