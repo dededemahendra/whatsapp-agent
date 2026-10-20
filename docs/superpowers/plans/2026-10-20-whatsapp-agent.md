@@ -1053,6 +1053,28 @@ describe('createRunner against the fake wacli', () => {
     expect(rec!.env.WACLI_READONLY).toBeUndefined();
   });
 
+  it('isolates WACLI_READONLY per mode even when the parent env sets it', async () => {
+    const r = createRunner({ bin: FAKE_WACLI, baseEnv: { ...fakeEnv({ FAKE_WACLI_LOG: log }), WACLI_READONLY: '1' } });
+    await r.write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi']);
+    await r.read(['doctor'], { env: { WACLI_READONLY: '0' } });
+    const recs = await readArgvLog(log);
+    expect(recs[0]!.env.WACLI_READONLY).toBeUndefined();
+    expect(recs[1]!.env.WACLI_READONLY).toBe('1');
+  });
+
+  it('marks a failed write as outcome-uncertain and leaves reads alone', async () => {
+    const failing = runner({ FAKE_WACLI_FAIL: '*|1|connection reset by peer' });
+    await expect(failing.write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.stringContaining('may have gone through'),
+      details: expect.objectContaining({ outcome_uncertain: true }),
+    });
+    await expect(failing.read(['doctor'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.not.stringContaining('may have gone through'),
+    });
+  });
+
   it('prefixes --account when configured', async () => {
     await runner({}, 'work').read(['doctor']);
     const [rec] = await readArgvLog(log);
@@ -1114,6 +1136,13 @@ describe('pure helpers', () => {
   it('classifyMessage maps not found', () => {
     expect(classifyMessage('message not found').code).toBe('not_found');
   });
+
+  it('classifyMessage maps wacli deadline wording to timeout and keeps lock waits as store_locked', () => {
+    const e = classifyMessage('send text: context deadline exceeded');
+    expect(e.code).toBe('timeout');
+    expect(e.message).toContain('may have gone through');
+    expect(classifyMessage('timed out waiting for store lock after 5s').code).toBe('store_locked');
+  });
 });
 ```
 
@@ -1136,6 +1165,7 @@ export const READ_TIMEOUT_MS = 30_000;
 export const WRITE_TIMEOUT_MS = 90_000;
 export const MEDIA_TIMEOUT_MS = 120_000;
 export const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+export const SEND_UNCERTAIN = 'The outcome is uncertain: read the chat before retrying, because the message may have gone through.';
 
 export interface RunOptions {
   timeoutMs?: number;
@@ -1216,6 +1246,9 @@ export function classifyMessage(message: string, stderr = ''): AgentError {
   if (m.includes('store is locked') || m.includes('waiting for store lock')) {
     return new AgentError('store_locked', 'The wacli store is locked by another process. Check `whatsapp-agent daemon status`.');
   }
+  if (m.includes('deadline exceeded') || m.includes('timed out') || m.includes('timeout')) {
+    return new AgentError('timeout', `wacli reported a timeout: ${message}. If this was a send, read the chat before retrying: the message may have gone through.`);
+  }
   if (m.includes('not found') || m.includes('no such') || m.includes('unknown chat')) {
     return new AgentError('not_found', message);
   }
@@ -1248,6 +1281,12 @@ export function classifyFailure(code: number, stdout: string, stderr: string): A
   return classifyMessage(line || `wacli exited with code ${code}`, stderr);
 }
 
+function markUncertain(err: AgentError): AgentError {
+  if (err.code !== 'wacli_error' && err.code !== 'timeout') return err;
+  const message = err.message.includes('may have gone through') ? err.message : `${err.message} ${SEND_UNCERTAIN}`;
+  return new AgentError(err.code, message, { ...err.details, outcome_uncertain: true });
+}
+
 export function createRunner(cfg: RunnerConfig): Runner {
   const spawn = cfg.spawn ?? defaultSpawn;
   const prefix = cfg.account ? ['--account', cfg.account] : [];
@@ -1261,8 +1300,16 @@ export function createRunner(cfg: RunnerConfig): Runner {
     if (mode === 'read') env.WACLI_READONLY = '1';
     else delete env.WACLI_READONLY;
     debug('wacli', { mode, command: args.slice(0, 2).join(' ') });
-    const r = await spawn(cfg.bin, full, env, timeoutMs);
-    if (r.code !== 0) throw classifyFailure(r.code, r.stdout, r.stderr);
+    let r: SpawnResult;
+    try {
+      r = await spawn(cfg.bin, full, env, timeoutMs);
+    } catch (e) {
+      throw mode === 'write' && e instanceof AgentError ? markUncertain(e) : e;
+    }
+    if (r.code !== 0) {
+      const err = classifyFailure(r.code, r.stdout, r.stderr);
+      throw mode === 'write' ? markUncertain(err) : err;
+    }
     return parseEnvelope<T>(r.stdout, r.stderr);
   }
 
@@ -1281,7 +1328,7 @@ export function createRunner(cfg: RunnerConfig): Runner {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/runner.test.ts && pnpm typecheck`
-Expected: PASS (14 tests). The timeout test takes about 0.3 s; the oversized-output test about 1 s.
+Expected: PASS (17 tests). The timeout test takes about 0.3 s; the oversized-output test about 1 s.
 
 - [ ] **Step 5: Commit**
 
