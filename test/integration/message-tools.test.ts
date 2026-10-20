@@ -1,12 +1,38 @@
-import { realpath, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, realpath, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { makeHarness, type Harness } from '../helpers/harness.js';
+import { sniffImageMime } from '../../src/mcp/tools/media.js';
+import type { RunOptions, Runner } from '../../src/wacli/runner.js';
+import { errorOf, makeHarness, type Harness } from '../helpers/harness.js';
 
 let h: Harness;
 afterEach(async () => { await h?.close(); });
 
 type Msg = { id: string; reply_to: { id: string } | null };
+
+const ALICE = '61400000001@s.whatsapp.net';
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+
+function mediaDirFor(h: Harness, jid: string): string {
+  return path.join(h.tmp, 'data', 'media', createHash('sha256').update(jid).digest('hex').slice(0, 16));
+}
+
+/** Make `media download` report a chosen path and MIME type while every other command still reaches the fake. */
+function stubMediaResult(h: Harness, reported: { path: string; mime_type: string }): void {
+  const original = h.deps.runner;
+  h.deps.runner = {
+    bin: original.bin,
+    write: original.write,
+    version: original.version,
+    read: (async (args: string[], opts?: RunOptions) => {
+      if (args[0] === 'media') {
+        return { chat: ALICE, id: 'MSG3', path: reported.path, bytes: 70, media_type: 'image', mime_type: reported.mime_type, downloaded: true, source: 'direct' };
+      }
+      return original.read(args, opts);
+    }) as Runner['read'],
+  };
+}
 
 describe('read_messages', () => {
   it('resolves the chat, lists newest-first from wacli and returns oldest-first', async () => {
@@ -91,5 +117,68 @@ describe('download_media', () => {
     h = await makeHarness({ policy: (p) => ({ ...p, media: { inlineImageMaxBytes: 10 } }) });
     const r = await h.call('download_media', { chat: 'Alice', message_id: 'MSG3' });
     expect(r.content.find((c) => c.type === 'image')).toBeUndefined();
+  });
+});
+
+describe('download_media guards', () => {
+  it('refuses a file outside the per-chat media folder', async () => {
+    h = await makeHarness();
+    const outside = path.join(h.tmp, 'outside.png');
+    await writeFile(outside, PNG);
+    stubMediaResult(h, { path: outside, mime_type: 'image/png' });
+    const r = await h.call('download_media', { chat: 'Alice', message_id: 'MSG3' });
+    expect(r.isError).toBe(true);
+    expect(errorOf(r)).toMatchObject({ error: 'wacli_error', message: expect.stringContaining('outside the media folder') });
+    expect(r.content.find((c) => c.type === 'image')).toBeUndefined();
+  });
+
+  it('refuses a symlink inside the folder that points outside it', async () => {
+    h = await makeHarness();
+    const dir = mediaDirFor(h, ALICE);
+    await mkdir(dir, { recursive: true });
+    const outside = path.join(h.tmp, 'outside.png');
+    await writeFile(outside, PNG);
+    const link = path.join(dir, 'MSG3.png');
+    await symlink(outside, link);
+    stubMediaResult(h, { path: link, mime_type: 'image/png' });
+    const r = await h.call('download_media', { chat: 'Alice', message_id: 'MSG3' });
+    expect(errorOf(r).error).toBe('wacli_error');
+  });
+
+  it('reports a missing file as an error', async () => {
+    h = await makeHarness();
+    stubMediaResult(h, { path: path.join(mediaDirFor(h, ALICE), 'missing.png'), mime_type: 'image/png' });
+    const r = await h.call('download_media', { chat: 'Alice', message_id: 'MSG3' });
+    expect(r.isError).toBe(true);
+  });
+
+  it('inlines only allowlisted image types whose bytes match the declared type', async () => {
+    h = await makeHarness();
+    const dir = mediaDirFor(h, ALICE);
+    await mkdir(dir, { recursive: true });
+    const file = path.join(dir, 'MSG3.png');
+    await writeFile(file, PNG);
+    stubMediaResult(h, { path: file, mime_type: 'image/svg+xml' });
+    let r = await h.call('download_media', { chat: 'Alice', message_id: 'MSG3' });
+    expect(r.isError).toBeFalsy();
+    expect(r.content.find((c) => c.type === 'image')).toBeUndefined();
+    stubMediaResult(h, { path: file, mime_type: 'image/jpeg' });
+    r = await h.call('download_media', { chat: 'Alice', message_id: 'MSG3' });
+    expect(r.isError).toBeFalsy();
+    expect(r.content.find((c) => c.type === 'image')).toBeUndefined();
+    stubMediaResult(h, { path: file, mime_type: 'image/png' });
+    r = await h.call('download_media', { chat: 'Alice', message_id: 'MSG3' });
+    expect(r.content.find((c) => c.type === 'image')?.mimeType).toBe('image/png');
+  });
+});
+
+describe('sniffImageMime', () => {
+  it('recognises png, jpeg, gif and webp and nothing else', () => {
+    expect(sniffImageMime(PNG)).toBe('image/png');
+    expect(sniffImageMime(Buffer.from([0xff, 0xd8, 0xff, 0xe0]))).toBe('image/jpeg');
+    expect(sniffImageMime(Buffer.from('GIF89a......'))).toBe('image/gif');
+    expect(sniffImageMime(Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')]))).toBe('image/webp');
+    expect(sniffImageMime(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'))).toBeNull();
+    expect(sniffImageMime(Buffer.alloc(0))).toBeNull();
   });
 });

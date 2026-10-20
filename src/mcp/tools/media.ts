@@ -11,6 +11,17 @@ import { nonEmpty, type WacliMediaDownload } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { messageIdInput, recipientInput } from '../schemas.js';
 
+/** Only formats every MCP host accepts are inlined, and only when the bytes match the declared type. */
+const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+export function sniffImageMime(bytes: Buffer): string | null {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 6 && ['GIF87a', 'GIF89a'].includes(bytes.subarray(0, 6).toString('latin1'))) return 'image/gif';
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('latin1') === 'RIFF' && bytes.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+  return null;
+}
+
 export function registerMediaTool(server: McpServer, deps: ServerDeps): void {
   const { limits } = deps.startupPolicy;
   server.registerTool(
@@ -40,8 +51,9 @@ export function registerMediaTool(server: McpServer, deps: ServerDeps): void {
         const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [
           { type: 'text', text: JSON.stringify(structured) },
         ];
-        if (mime && mime.startsWith('image/') && size <= policy.media.inlineImageMaxBytes) {
-          content.push({ type: 'image', data: (await readFile(real)).toString('base64'), mimeType: mime });
+        if (mime && INLINE_IMAGE_TYPES.has(mime) && size > 0 && size <= policy.media.inlineImageMaxBytes) {
+          const bytes = await readFile(real);
+          if (sniffImageMime(bytes) === mime) content.push({ type: 'image', data: bytes.toString('base64'), mimeType: mime });
         }
         return { content, structuredContent: structured };
       } catch (e) {
