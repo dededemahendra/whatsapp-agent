@@ -1,5 +1,5 @@
 import type { Paths } from '../paths.js';
-import { loadPolicy, type Policy } from '../policy/schema.js';
+import { loadPolicy, POLICY_HINT, type Policy } from '../policy/schema.js';
 import { summarizePolicy, type PolicySummary } from '../policy/summary.js';
 import type { Runner } from '../wacli/runner.js';
 import { getStatus, type StatusInfo } from '../wacli/status.js';
@@ -50,7 +50,8 @@ export async function collectDoctor(opts: { runner: Runner; policyFile: string; 
   try {
     policy = await loadPolicy(opts.policyFile);
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
+    // The loader ends its messages with ". Run whatsapp-agent doctor."; doctor is where the person already is.
+    const message = (e instanceof Error ? e.message : String(e)).replace(`. ${POLICY_HINT}`, '');
     problems.push(message.includes(opts.policyFile) ? message : `${opts.policyFile}: ${message}`);
   }
   for (const entry of policy?.writes.allow ?? []) {

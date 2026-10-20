@@ -16,7 +16,8 @@ const StatusOutput = z.object({
   policy: z.object({
     writes_enabled: z.boolean(), confirm: z.enum(['always', 'unlisted', 'never']), allow_count: z.number(),
     groups_enabled: z.boolean(), file_roots_count: z.number(), account: z.string().nullable(),
-  }),
+  }).nullable().describe('Null when the policy file could not be used; see policy_error.'),
+  policy_error: z.string().optional().describe('Why the policy file could not be used, and what the person should run. Present only then. Write tools refuse until it is fixed.'),
 });
 
 export function registerStatusTool(server: McpServer, deps: ServerDeps): void {
@@ -30,8 +31,11 @@ export function registerStatusTool(server: McpServer, deps: ServerDeps): void {
     },
     async () => {
       try {
-        const [status, policy] = await Promise.all([getStatus(deps.runner, deps.now()), deps.loadPolicy()]);
-        return ok({ ...status, policy: summarizePolicy(policy) });
+        // A broken policy file must not hide the pairing state, so the two are read separately. A wacli failure still fails the call.
+        const [status, policy] = await Promise.allSettled([getStatus(deps.runner, deps.now()), deps.loadPolicy()]);
+        if (status.status === 'rejected') throw status.reason;
+        if (policy.status === 'fulfilled') return ok({ ...status.value, policy: summarizePolicy(policy.value) });
+        return ok({ ...status.value, policy: null, policy_error: policy.reason instanceof Error ? policy.reason.message : String(policy.reason) });
       } catch (e) {
         return toToolError(e);
       }

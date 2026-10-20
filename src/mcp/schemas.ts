@@ -31,7 +31,7 @@ export const ParticipantSchema = z.object({ jid: z.string(), role: z.string(), i
 
 export const SendResultSchema = z.object({ sent: z.literal(true), message_id: z.string(), to: ResolvedSchema, timestamp: z.string() });
 
-export const dateInput = z.string().regex(/^\d{4}-\d{2}-\d{2}(T[0-9:.+\-Z]*)?$/, 'Use YYYY-MM-DD or RFC 3339');
+export const dateInput = z.string().max(40).regex(/^\d{4}-\d{2}-\d{2}(T[0-9:.+\-Z]*)?$/, 'Use YYYY-MM-DD or RFC 3339');
 export const messageIdInput = z.string().min(1).max(200).regex(/^[\w\-:.@=]+$/, 'Message id contains unexpected characters');
 export const limitInput = z.int().min(1).max(200);
 export const recipientInput = (max: number) => z.string().min(1).max(max).describe('Phone number, JID, or exact chat or contact name');

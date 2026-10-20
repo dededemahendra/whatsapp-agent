@@ -1,12 +1,15 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { toToolError } from '../../errors.js';
-import { asList, toMessage, type WacliContext, type WacliMessagePage } from '../../wacli/shape.js';
+import { asList, hasMessageIds, toMessage, type WacliContext, type WacliMessage, type WacliMessagePage } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { effectiveLimit, ok } from '../result.js';
 import { dateInput, limitInput, MessageSchema, messageIdInput, PageSchema, recipientInput, ResolvedSchema } from '../schemas.js';
 
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
+
+/** The usable rows of a list wacli returned, in order. */
+const messageRows = (rows: WacliMessage[] | null | undefined): WacliMessage[] => asList(rows).filter(hasMessageIds);
 
 function pageOf(p: WacliMessagePage): { has_more: boolean; next_cursor: string | null } {
   return { has_more: p.page?.has_more ?? false, next_cursor: p.page?.next_cursor ?? null };
@@ -39,7 +42,7 @@ export function registerMessageTools(server: McpServer, deps: ServerDeps): void 
         if (after) args.push(`--after=${after}`);
         if (cursor) args.push(`--cursor=${cursor}`);
         const page = await deps.runner.read<WacliMessagePage>(args);
-        const messages = asList(page.messages).slice(0, n).map(toMessage).reverse();
+        const messages = messageRows(page.messages).slice(0, n).map(toMessage).reverse();
         return ok({ chat: resolved, order: 'oldest_first', messages, page: pageOf(page) });
       } catch (e) {
         return toToolError(e);
@@ -79,7 +82,7 @@ export function registerMessageTools(server: McpServer, deps: ServerDeps): void 
         if (cursor) args.push(`--cursor=${cursor}`);
         args.push('--', query);
         const page = await deps.runner.read<WacliMessagePage>(args);
-        return ok({ messages: asList(page.messages).slice(0, n).map(toMessage), page: pageOf(page) });
+        return ok({ messages: messageRows(page.messages).slice(0, n).map(toMessage), page: pageOf(page) });
       } catch (e) {
         return toToolError(e);
       }
@@ -106,7 +109,7 @@ export function registerMessageTools(server: McpServer, deps: ServerDeps): void 
         const ctx = await deps.runner.read<WacliContext>([
           'messages', 'context', `--chat=${resolved.jid}`, `--id=${message_id}`, `--before=${before ?? 5}`, `--after=${after ?? 5}`,
         ]);
-        return ok({ chat: resolved, target_id: message_id, messages: asList(ctx.messages).map(toMessage) });
+        return ok({ chat: resolved, target_id: message_id, messages: messageRows(ctx.messages).map(toMessage) });
       } catch (e) {
         return toToolError(e);
       }

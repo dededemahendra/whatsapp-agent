@@ -134,6 +134,7 @@ describe('doctor with a corrupt policy', () => {
     await writeFile(paths.policyFile, 'not json');
     const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date() });
     expect(r.problems).toEqual([`${paths.policyFile} is not valid JSON`]);
+    expect(formatDoctor(r)).not.toContain('Run whatsapp-agent doctor');
   });
 
   it('runs as a command with exit code 1, reads the account without loading deps, and creates no directories', async () => {

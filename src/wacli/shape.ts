@@ -93,6 +93,13 @@ export function toChat(raw: WacliChat, now: Date = new Date()): AgentChat {
   };
 }
 
+/** A message row needs both ids to be a message at all. wacli's rows are untyped JSON, so a row without them is dropped rather than failing the page. */
+export function hasMessageIds(row: unknown): row is WacliMessage {
+  if (typeof row !== 'object' || row === null) return false;
+  const r = row as { MsgID?: unknown; ChatJID?: unknown };
+  return typeof r.MsgID === 'string' && typeof r.ChatJID === 'string';
+}
+
 export function toMessage(raw: WacliMessage): AgentMessage {
   const type = nonEmpty(raw.MediaType);
   const revoked = Boolean(raw.Revoked);

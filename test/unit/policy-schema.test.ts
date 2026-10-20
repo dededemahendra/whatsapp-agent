@@ -80,4 +80,26 @@ describe('policy schema', () => {
     await mkdir(dir);
     await expect(loadPolicy(dir)).rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining('EISDIR') });
   });
+
+  it('tells the person what to run when the policy cannot be used', async () => {
+    const hint = 'Run whatsapp-agent doctor.';
+    const bad = path.join(tmp, 'bad.json');
+    await writeFile(bad, 'not json');
+    await expect(loadPolicy(bad)).rejects.toMatchObject({ code: 'invalid_input', message: `${bad} is not valid JSON. ${hint}` });
+
+    const wrong = path.join(tmp, 'wrong.json');
+    await writeFile(wrong, '{"version":1}');
+    const invalid = (await loadPolicy(wrong).catch((e: unknown) => e)) as Error;
+    expect(invalid.message).toMatch(new RegExp(`^${wrong.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} is invalid: .+\\. Run whatsapp-agent doctor\\.$`));
+
+    const dir = path.join(tmp, 'dir.json');
+    await mkdir(dir);
+    await expect(loadPolicy(dir)).rejects.toMatchObject({ message: `${dir} could not be read (EISDIR). ${hint}` });
+  });
+
+  it('leaves the hint off the errors savePolicy raises about a policy it was handed', async () => {
+    const file = path.join(tmp, 'cfg', 'policy.json');
+    const err = (await savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: [''] } }).catch((e: unknown) => e)) as Error;
+    expect(err.message).not.toContain('doctor');
+  });
 });

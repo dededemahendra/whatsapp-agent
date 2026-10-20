@@ -148,6 +148,16 @@ describe('file roots', () => {
     expect(isInsideRoot('/a/b', '/a/b')).toBe(false);
   });
 
+  it('isInsideRoot tells a file whose name starts with two dots from a path that leaves the root', () => {
+    expect(isInsideRoot('/a/b/..notes.txt', '/a/b')).toBe(true);
+    expect(isInsideRoot('/a/b/...hidden', '/a/b')).toBe(true);
+    expect(isInsideRoot('/a/b/..d/c.txt', '/a/b')).toBe(true);
+    expect(isInsideRoot('/a', '/a/b')).toBe(false);
+    expect(isInsideRoot('/a/c.txt', '/a/b')).toBe(false);
+    expect(isInsideRoot('/a/b/../c.txt', '/a/b')).toBe(false);
+    expect(isInsideRoot('/other', '/a/b')).toBe(false);
+  });
+
   it('accepts a file inside a root and rejects a symlink escaping the root', async () => {
     const root = path.join(tmp, 'root');
     const outside = path.join(tmp, 'outside');
@@ -161,5 +171,12 @@ describe('file roots', () => {
     expect(await fileInsideRoots(path.join(root, 'ok.txt'), [])).toBe(false);
     expect(await fileInsideRoots(path.join(root, 'ok.txt'), [path.join(tmp, 'missing'), root])).toBe(true);
     expect(await fileInsideRoots(path.join(root, 'absent.txt'), [root])).toBe(false);
+  });
+
+  it('accepts a file inside a root whose name starts with two dots', async () => {
+    const root = path.join(tmp, 'root');
+    await mkdir(root);
+    await writeFile(path.join(root, '..notes.txt'), 'x');
+    expect(await fileInsideRoots(path.join(root, '..notes.txt'), [root])).toBe(true);
   });
 });

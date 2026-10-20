@@ -6,6 +6,7 @@ import { AgentError, toToolError } from '../../errors.js';
 import { debug } from '../../log.js';
 import type { AuditRecord } from '../../policy/audit.js';
 import { DENY_MESSAGES, decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
+import type { Policy } from '../../policy/schema.js';
 import type { Resolved } from '../../wacli/resolve.js';
 import { SEND_UNCERTAIN, type RunOptions } from '../../wacli/runner.js';
 import type { WacliChatStateResult, WacliSendResult } from '../../wacli/shape.js';
@@ -18,7 +19,7 @@ import { ok } from '../result.js';
 import { messageIdInput, recipientInput, ResolvedSchema, SendResultSchema } from '../schemas.js';
 
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
-const POLICY_NOTE = "Subject to the person's policy: may be disabled, may require their confirmation, and is rate limited. A denial is final; report it rather than retrying.";
+const POLICY_NOTE = "Subject to the person's policy: may be disabled, may require their confirmation, and is rate limited. A denial is final, except rate_limited, which says when to retry; report any other denial rather than retrying.";
 
 type Deny = Extract<Decision, { kind: 'deny' }>;
 
@@ -117,10 +118,11 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   /**
    * Decides, and when the decision is allow, records the send inside the same serialised section. mark_read is not rate limited.
    * `expect` is what this call would send: an accept counts only if the state it came back with was minted for exactly that.
+   * `policy` is the snapshot the caller already used for its own checks; without one the policy is read here.
    */
-  async function gate(ctx: HandlerCtx, tool: WriteTool, recipient: Resolved, extra: { fileInsideRoots?: boolean; expect?: ConfirmState } = {}): Promise<Decision> {
+  async function gate(ctx: HandlerCtx, tool: WriteTool, recipient: Resolved, extra: { policy?: Policy; fileInsideRoots?: boolean; expect?: ConfirmState } = {}): Promise<Decision> {
     return serialised(async () => {
-      const policy = await deps.loadPolicy();
+      const policy = extra.policy ?? await deps.loadPolicy();
       const rate = await deps.rateLimiter.snapshot(deps.now());
       const answer = extra.expect ? readAnswer(ctx, extra.expect) : 'none';
       const decision = decide({ policy, tool, recipient, fileInsideRoots: extra.fileInsideRoots, rate, clientCanConfirm: clientCanConfirm(server, ctx), answer });
@@ -241,16 +243,17 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const off = await switchedOff('send_file', { file: a.path });
         if (off) return off;
         recipient = await deps.resolver.resolve(a.to, { exact: true });
+        // One snapshot of the policy serves the file check, the decision and the roots handed to wacli, so they cannot disagree.
         const policy = await deps.loadPolicy();
         const facts = (await fileInsideRoots(a.path, policy.writes.fileRoots)) ? await fileFacts(a.path) : null;
         // Without facts the file is treated as outside the roots, so the gate refuses before these placeholder values are looked at.
         const send: FileSend = { ...(facts ?? { realPath: a.path, size: 0, mtimeMs: 0 }), caption: a.caption, as: a.as, filename: a.filename };
         const state = fileState(recipient, send);
-        const d = await gate(ctx, 'send_file', recipient, { fileInsideRoots: facts !== null, expect: state });
+        const d = await gate(ctx, 'send_file', recipient, { policy, fileInsideRoots: facts !== null, expect: state });
         if (d.kind === 'deny') return denied('send_file', recipient, d, { file: a.path });
         if (d.kind === 'confirm') return await confirmationRequired(filePrompt(recipient, send), state);
         release = hold();
-        const argv = ['send', 'file', `--to=${recipient.jid}`, `--file=${a.path}`];
+        const argv = ['send', 'file', `--to=${recipient.jid}`, `--file=${send.realPath}`]; // the path that was vetted, not the one the agent gave
         if (a.caption) argv.push(`--caption=${a.caption}`);
         if (a.as && a.as !== 'auto') argv.push(`--as=${a.as}`);
         if (a.filename) argv.push(`--filename=${a.filename}`);

@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, realpath, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AgentError } from '../../src/errors.js';
@@ -179,7 +179,7 @@ describe('send_file', () => {
       const r = await h.call('send_file', { to: 'Alice', path: file, caption: 'the report', as: 'document' });
       expect(r.isError).toBeFalsy();
       const [send] = (await h.argv()).filter((x) => x.key === 'send file');
-      expect(send!.argv.slice(3)).toEqual(['send', 'file', '--to=61400000001@s.whatsapp.net', `--file=${file}`, '--caption=the report', '--as=document']);
+      expect(send!.argv.slice(3)).toEqual(['send', 'file', '--to=61400000001@s.whatsapp.net', `--file=${await realpath(file)}`, '--caption=the report', '--as=document']);
       expect(send!.env.WACLI_MEDIA_ROOTS).toBe(outbox);
       expect(h.audits.at(-1)).toMatchObject({ tool: 'send_file', outcome: 'sent', file });
     } finally {
@@ -631,5 +631,63 @@ describe('a failure after the write has been handed to wacli is uncertain', () =
     stubWrite(h, async () => ({ get id(): string { throw new AgentError('not_found', 'late surprise'); } }));
     const e = errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' }));
     expect(e).toMatchObject({ error: 'not_found', message: `late surprise. ${SEND_UNCERTAIN}`, outcome_uncertain: true });
+  });
+});
+
+describe('send_file hands wacli the file it vetted', () => {
+  it('passes the real path, not a link that could be pointed elsewhere after the check', async () => {
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      const real = path.join(outbox, 'real.pdf');
+      const link = path.join(outbox, 'link.pdf');
+      await writeFile(real, 'pdf');
+      await symlink(real, link);
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox] }) });
+      const r = await h.call('send_file', { to: 'Alice', path: link });
+      expect(r.isError).toBeFalsy();
+      const [send] = (await h.argv()).filter((x) => x.key === 'send file');
+      expect(send!.argv).toContain(`--file=${await realpath(real)}`);
+      expect(send!.argv.some((a) => a === `--file=${link}`)).toBe(false);
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(outbox);
+      expect(h.audits.at(-1)).toMatchObject({ tool: 'send_file', outcome: 'sent', file: link });
+    } finally {
+      await removeTmp(outbox);
+    }
+  });
+
+  it('sends a file whose name starts with two dots from inside a root', async () => {
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      const file = path.join(outbox, '..notes.txt');
+      await writeFile(file, 'notes');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox] }) });
+      const r = await h.call('send_file', { to: 'Alice', path: file });
+      expect(r.isError).toBeFalsy();
+    } finally {
+      await removeTmp(outbox);
+    }
+  });
+
+  it('reads the policy once for the file check, the decision and the roots', async () => {
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      const file = path.join(outbox, 'report.pdf');
+      await writeFile(file, 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox] }) });
+      const snapshot = h.deps.startupPolicy;
+      let loads = 0;
+      // The first read is the master switch check. Every later read is switched off, so anything that reads again would be refused.
+      h.deps.loadPolicy = async () => {
+        loads += 1;
+        return loads <= 2 ? snapshot : { ...snapshot, writes: { ...snapshot.writes, enabled: false, fileRoots: [] } };
+      };
+      const r = await h.call('send_file', { to: 'Alice', path: file });
+      expect(r.isError).toBeFalsy();
+      expect(loads).toBe(2);
+      const [send] = (await h.argv()).filter((x) => x.key === 'send file');
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(outbox);
+    } finally {
+      await removeTmp(outbox);
+    }
   });
 });

@@ -100,7 +100,8 @@ export function decide(i: DecideInput): Decision {
 
 export function isInsideRoot(realPath: string, realRoot: string): boolean {
   const rel = path.relative(realRoot, realPath);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  // `..notes.txt` is a file in the root; only `..` itself, or `..` followed by a separator, leaves it.
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 }
 
 export async function fileInsideRoots(filePath: string, roots: string[]): Promise<boolean> {

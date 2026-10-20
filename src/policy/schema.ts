@@ -64,6 +64,9 @@ function describeIssues(error: z.ZodError): string {
   return error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
 }
 
+/** Ends every message about a policy file that cannot be used, so a person at a terminal, or an agent passing the message on, knows where to look. */
+export const POLICY_HINT = 'Run whatsapp-agent doctor.';
+
 export async function loadPolicy(file: string): Promise<Policy> {
   let raw: string;
   try {
@@ -71,16 +74,16 @@ export async function loadPolicy(file: string): Promise<Policy> {
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return structuredClone(DEFAULT_POLICY);
-    throw new AgentError('invalid_input', `${file} could not be read${code ? ` (${code})` : ''}`);
+    throw new AgentError('invalid_input', `${file} could not be read${code ? ` (${code})` : ''}. ${POLICY_HINT}`);
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new AgentError('invalid_input', `${file} is not valid JSON`);
+    throw new AgentError('invalid_input', `${file} is not valid JSON. ${POLICY_HINT}`);
   }
   const result = PolicySchema.safeParse(parsed);
-  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error)}`);
+  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error).replace(/[\s.]+$/, '')}. ${POLICY_HINT}`);
   return result.data;
 }
 
