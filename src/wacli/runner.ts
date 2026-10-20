@@ -36,7 +36,6 @@ export interface Runner {
   version(): Promise<string | null>;
 }
 
-interface Envelope { success: boolean; data: unknown; error: string | null }
 type Found = { kind: 'none' } | { kind: 'unreadable' } | { kind: 'envelope'; env: Record<string, unknown> };
 
 export const defaultSpawn: SpawnFn = (bin, args, env, timeoutMs) =>
