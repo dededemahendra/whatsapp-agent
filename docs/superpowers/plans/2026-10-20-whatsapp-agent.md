@@ -2123,7 +2123,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { decide, fileInsideRoots, isInsideRoot, matchesAllow, type DecideInput } from '../../src/policy/engine.js';
+import { decide, fileInsideRoots, isInsideRoot, matchesAllow, sameAllowTarget, type DecideInput } from '../../src/policy/engine.js';
 import { DEFAULT_POLICY, type Policy } from '../../src/policy/schema.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
@@ -2153,6 +2153,18 @@ describe('matchesAllow', () => {
     expect(matchesAllow(['Alice'], alice)).toBe(false);
     expect(matchesAllow(['+61 400 000 002', 'Bob'], alice)).toBe(false);
     expect(matchesAllow([], alice)).toBe(false);
+  });
+});
+
+describe('sameAllowTarget', () => {
+  it('treats spellings of one number, its JID forms, and exact text as the same target', () => {
+    expect(sameAllowTarget('+61 400 000 001', '61400000001')).toBe(true);
+    expect(sameAllowTarget('+61400000001', '61400000001@s.whatsapp.net')).toBe(true);
+    expect(sameAllowTarget('61400000001:7@s.whatsapp.net', '61400000001@S.WHATSAPP.NET')).toBe(true);
+    expect(sameAllowTarget('120363000000000001@g.us', '120363000000000001@g.us')).toBe(true);
+    expect(sameAllowTarget('+61 400 000 001', '+61 400 000 002')).toBe(false);
+    expect(sameAllowTarget('Alice', 'alice')).toBe(true);
+    expect(sameAllowTarget('Alice', '+61400000001')).toBe(false);
   });
 });
 
@@ -2296,6 +2308,21 @@ export function matchesAllow(allow: string[], r: Resolved): boolean {
     if (looksLikePhone(e) && digitsOf(e) === user) return true;
   }
   return false;
+}
+
+/** True when two allowlist entries denote the same recipient: phones by digits, user JIDs by their number, other JIDs canonical, else exact text, all case-insensitive. */
+export function sameAllowTarget(a: string, b: string): boolean {
+  const key = (raw: string): string => {
+    const s = raw.trim();
+    const l = s.toLowerCase();
+    if (JID_RE.test(l)) {
+      const c = canonicalJid(l);
+      return c.endsWith('@s.whatsapp.net') ? `user:${jidUser(c)}` : `jid:${c}`;
+    }
+    if (looksLikePhone(s)) return `user:${digitsOf(s)}`;
+    return `text:${l}`;
+  };
+  return key(a) === key(b);
 }
 
 function deny(code: DenyCode, retryAfterSeconds?: number): Decision {
@@ -4374,14 +4401,17 @@ describe('policy edits', () => {
     expect((await disableWrites(file)).writes.enabled).toBe(false);
   });
 
-  it('stores phone numbers as given, canonicalises JIDs, and dedupes', async () => {
+  it('dedupes and removes by target, not by spelling, and refuses national numbers', async () => {
     await allowRecipient(file, '+61 400 000 001');
-    await allowRecipient(file, '+61 400 000 001');
+    await allowRecipient(file, '+61400000001');
     await allowRecipient(file, '+61400000002:3@s.whatsapp.net');
     await allowRecipient(file, '61400000002@s.whatsapp.net');
     expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001', '61400000002@s.whatsapp.net']);
     await removeRecipient(file, '61400000002:9@s.whatsapp.net');
-    expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001']);
+    await removeRecipient(file, '61400000001');
+    expect((await loadPolicy(file)).writes.allow).toEqual([]);
+    await expect(removeRecipient(file, 'nobody')).rejects.toMatchObject({ code: 'not_found' });
+    await expect(allowRecipient(file, '0400 000 001')).rejects.toMatchObject({ code: 'invalid_input' });
   });
 
   it('resolves a name to its JID once and refuses names without a resolver or unsendable kinds', async () => {
@@ -4412,6 +4442,8 @@ describe('policy edits', () => {
     expect(text).toContain('confirm: always');
     expect(text).toContain('Alice (inert: not a phone number or JID)');
     expect(isInertEntry('+61 400 000 001')).toBe(false);
+    expect(isInertEntry('61400000001@S.WHATSAPP.NET')).toBe(false);
+    expect(isInertEntry('0400 000 001')).toBe(true);
   });
 });
 ```
@@ -4460,7 +4492,7 @@ describe('doctor', () => {
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { formatAudit } from '../../src/ops/audit-cmd.js';
+import { formatAudit, parseLimit, parseSince } from '../../src/ops/audit-cmd.js';
 import { claudeMcpAddCommand, mcpConfigJson } from '../../src/ops/mcp-config.js';
 
 describe('audit formatting', () => {
@@ -4475,6 +4507,15 @@ describe('audit formatting', () => {
   });
   it('says so when empty', () => {
     expect(formatAudit([])).toBe('No audit records.\n');
+  });
+});
+
+describe('audit option parsing', () => {
+  it('rejects non-positive or non-numeric limits and unparseable dates', () => {
+    expect(parseLimit('5')).toBe(5);
+    for (const bad of ['0', '-1', 'abc', '1.5']) expect(() => parseLimit(bad)).toThrowError(expect.objectContaining({ code: 'invalid_input' }));
+    expect(parseSince('2026-10-20').toISOString()).toBe('2026-10-20T00:00:00.000Z');
+    for (const bad of ['garbage', '7d']) expect(() => parseSince(bad)).toThrowError(expect.objectContaining({ code: 'invalid_input' }));
   });
 });
 
@@ -4626,7 +4667,8 @@ import { Command } from 'commander';
 import { AgentError } from '../errors.js';
 import { resolvePaths } from '../paths.js';
 import { loadPolicy, savePolicy, type ConfirmMode, type Policy } from '../policy/schema.js';
-import { canonicalJid, createResolver, JID_RE, looksLikePhone, type Resolver } from '../wacli/resolve.js';
+import { sameAllowTarget } from '../policy/engine.js';
+import { canonicalJid, createResolver, digitsOf, JID_RE, looksLikePhone, type Resolver } from '../wacli/resolve.js';
 import { createRunner } from '../wacli/runner.js';
 
 async function edit(file: string, fn: (p: Policy) => Policy): Promise<Policy> {
@@ -4638,35 +4680,38 @@ async function edit(file: string, fn: (p: Policy) => Policy): Promise<Policy> {
 export const enableWrites = (file: string) => edit(file, (p) => ({ ...p, writes: { ...p.writes, enabled: true } }));
 export const disableWrites = (file: string) => edit(file, (p) => ({ ...p, writes: { ...p.writes, enabled: false } }));
 
-/** True when an allowlist entry is neither a phone number nor a JID, so it can never match (A18). */
+/** True when an allowlist entry is neither a phone number (international format) nor a JID, so it can never match (A18). */
 export function isInertEntry(entry: string): boolean {
   const e = entry.trim();
-  return !(JID_RE.test(e) || looksLikePhone(e));
+  return !(JID_RE.test(e.toLowerCase()) || (looksLikePhone(e) && !digitsOf(e).startsWith('0')));
 }
 
 /** Phone numbers are stored as given, JIDs canonicalised; a name is resolved once through wacli and stored as its JID. */
 export async function allowRecipient(file: string, entry: string, resolver?: Resolver): Promise<Policy> {
   const e = entry.trim();
   let stored: string;
-  if (JID_RE.test(e)) {
-    stored = canonicalJid(e);
+  if (JID_RE.test(e.toLowerCase())) {
+    stored = canonicalJid(e.toLowerCase());
   } else if (looksLikePhone(e)) {
+    if (digitsOf(e).startsWith('0')) {
+      throw new AgentError('invalid_input', `"${e}" looks like a national number. Use the international format with the country code, for example +61 400 000 001.`);
+    }
     stored = e;
   } else {
     if (!resolver) throw new AgentError('invalid_input', `"${e}" is not a phone number or JID. Names are looked up through wacli; pass the number or JID instead.`);
     const r = await resolver.resolve(e);
     if (r.kind !== 'user' && r.kind !== 'group') throw new AgentError('invalid_input', `"${e}" is a ${r.kind}, which cannot receive messages.`);
-    stored = r.jid;
+    stored = canonicalJid(r.jid);
   }
-  return edit(file, (p) => (p.writes.allow.some((a) => a.toLowerCase() === stored.toLowerCase())
+  return edit(file, (p) => (p.writes.allow.some((a) => sameAllowTarget(a, stored))
     ? p
     : { ...p, writes: { ...p.writes, allow: [...p.writes.allow, stored] } }));
 }
 
 export const removeRecipient = (file: string, entry: string) => edit(file, (p) => {
-  const e = entry.trim();
-  const target = (JID_RE.test(e) ? canonicalJid(e) : e).toLowerCase();
-  return { ...p, writes: { ...p.writes, allow: p.writes.allow.filter((a) => a.toLowerCase() !== target) } };
+  const kept = p.writes.allow.filter((a) => !sameAllowTarget(a, entry));
+  if (kept.length === p.writes.allow.length) throw new AgentError('not_found', `"${entry.trim()}" is not on the allowlist.`);
+  return { ...p, writes: { ...p.writes, allow: kept } };
 });
 
 export const setConfirm = (file: string, mode: ConfirmMode) => edit(file, (p) => ({ ...p, writes: { ...p.writes, confirm: mode } }));
@@ -4729,6 +4774,7 @@ export function policyCommand(): Command {
 
 ```ts
 import { Command } from 'commander';
+import { AgentError } from '../errors.js';
 import { resolvePaths } from '../paths.js';
 import { readAudit, type AuditRecord } from '../policy/audit.js';
 
@@ -4747,17 +4793,28 @@ export function formatAudit(records: AuditRecord[]): string {
   return lines.join('\n') + '\n';
 }
 
+export function parseLimit(raw: string): number {
+  if (!/^[1-9]\d*$/.test(raw)) throw new AgentError('invalid_input', '--limit must be a positive whole number');
+  return Number(raw);
+}
+
+export function parseSince(raw: string): Date {
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) throw new AgentError('invalid_input', '--since must be YYYY-MM-DD (UTC midnight) or an RFC 3339 timestamp');
+  return d;
+}
+
 export function auditCommand(): Command {
   return new Command('audit')
     .description('Show what the agent sent or tried to send')
-    .option('-n, --limit <n>', 'number of records', '50')
-    .option('--since <date>', 'only records at or after this time (YYYY-MM-DD or RFC 3339)')
+    .option('-n, --limit <n>', 'number of records (a positive whole number)', '50')
+    .option('--since <date>', 'only records at or after this time (YYYY-MM-DD is UTC midnight, or RFC 3339)')
     .option('--tool <name>', 'filter by tool name')
     .option('--json', 'print JSON lines')
     .action(async (opts: { limit: string; since?: string; tool?: string; json?: boolean }) => {
       const records = await readAudit(resolvePaths().auditFile, {
-        limit: Number(opts.limit) || 50,
-        since: opts.since ? new Date(opts.since) : undefined,
+        limit: parseLimit(opts.limit),
+        since: opts.since ? parseSince(opts.since) : undefined,
         tool: opts.tool,
       });
       process.stdout.write(opts.json ? records.map((r) => JSON.stringify(r)).join('\n') + (records.length ? '\n' : '') : formatAudit(records));
@@ -4812,7 +4869,7 @@ program.addCommand(auditCommand());
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/policy-cmd.test.ts test/unit/doctor.test.ts test/unit/audit-cmd.test.ts && pnpm typecheck && pnpm build && node bin/whatsapp-agent.mjs policy show`
-Expected: PASS (11 tests); `policy show` prints `writes: disabled` and the other lines from the defaults.
+Expected: PASS (12 tests); `policy show` prints `writes: disabled` and the other lines from the defaults.
 
 - [ ] **Step 5: Commit**
 
