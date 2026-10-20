@@ -154,7 +154,9 @@ describe('graceful stop', () => {
     r.closeDone();
     await waitFor(() => r.events.includes('drain'), { what: 'drain' });
     expect(r.events).toEqual(['close', 'drain']);
-    expect(r.drainCalls).toEqual([10_000]);
+    expect(r.drainCalls).toHaveLength(1);
+    expect(r.drainCalls[0]).toBeGreaterThan(9_000); // whatever is left of the ten seconds once the close is done
+    expect(r.drainCalls[0]).toBeLessThanOrEqual(10_000);
     r.drainDone();
     await waitFor(() => r.exits.length > 0, { what: 'exit' });
     expect(r.events).toEqual(['close', 'drain', 'exit 0']);
@@ -173,6 +175,64 @@ describe('graceful stop', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(r.exits).toEqual([130]);
     expect(r.handle.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops waiting for a close that never settles once the budget is spent, still tries the drain, and exits 0', async () => {
+    const r = rig();
+    // rig().handle.close never settles unless the test calls closeDone(), which is the host that has stopped reading stdout.
+    installGracefulStop(r.handle, { ...r.hooks, drainMs: 250, drain: (ms) => { r.events.push('drain'); r.drainCalls.push(ms); return Promise.resolve(); } });
+    const t0 = Date.now();
+    r.listeners.get('SIGTERM')!();
+    await waitFor(() => r.exits.length > 0, { what: 'the exit at the end of the budget', timeoutMs: 3000 });
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeGreaterThanOrEqual(230);
+    expect(elapsed).toBeLessThan(2000);
+    expect(r.exits).toEqual([0]);
+    expect(r.events).toEqual(['close', 'drain', 'exit 0']);
+    expect(r.drainCalls).toHaveLength(1);
+    expect(r.drainCalls[0]).toBeLessThanOrEqual(30); // the close used the whole budget, so almost nothing is left for the drain
+    expect(r.drainCalls[0]).toBeGreaterThanOrEqual(0);
+  });
+
+  it('gives the drain what is left of the budget when the close takes only part of it', async () => {
+    const r = rig();
+    installGracefulStop(r.handle, { ...r.hooks, drainMs: 600, drain: (ms) => { r.events.push('drain'); r.drainCalls.push(ms); return Promise.resolve(); } });
+    r.listeners.get('SIGINT')!();
+    await waitFor(() => r.events.includes('close'), { what: 'close' });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    r.closeDone();
+    await waitFor(() => r.exits.length > 0, { what: 'exit', timeoutMs: 3000 });
+    expect(r.exits).toEqual([0]);
+    expect(r.drainCalls).toHaveLength(1);
+    expect(r.drainCalls[0]).toBeGreaterThan(250);
+    expect(r.drainCalls[0]).toBeLessThanOrEqual(420);
+  });
+
+  it('a second signal still ends a close that is stuck at once, without waiting for the budget', async () => {
+    const r = rig();
+    installGracefulStop(r.handle, { ...r.hooks, drainMs: 5000 });
+    r.listeners.get('SIGTERM')!();
+    await waitFor(() => r.events.includes('close'), { what: 'close' });
+    const t0 = Date.now();
+    r.listeners.get('SIGHUP')!();
+    expect(r.exits).toEqual([130]);
+    expect(Date.now() - t0).toBeLessThan(100);
+  });
+
+  it('leaves no timer behind when the close settles in time', async () => {
+    vi.useFakeTimers();
+    try {
+      const r = rig();
+      installGracefulStop(r.handle, { ...r.hooks, drain: () => Promise.resolve() });
+      r.listeners.get('SIGTERM')!();
+      await vi.advanceTimersByTimeAsync(0);
+      r.closeDone();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(r.exits).toEqual([0]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('still drains and exits 0 when closing the transport fails', async () => {

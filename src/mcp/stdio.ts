@@ -40,18 +40,20 @@ export interface StopHooks {
   exit?: (code: number) => void;
   /** Waits for writes in flight, for at most the given milliseconds. Defaults to `drainInFlight`. */
   drain?: (timeoutMs: number) => Promise<void>;
-  /** How long a stop waits for writes in flight. Defaults to 10 seconds. */
+  /** How long a stop may take in all, closing the transport and then waiting for writes in flight. Defaults to 10 seconds. */
   drainMs?: number;
 }
 
 /**
- * On SIGINT, SIGTERM or SIGHUP: stop accepting requests by closing the transport, give writes already in flight up to ten seconds to be
- * recorded, then exit 0. A second signal exits 130 at once, so a stuck stop can always be forced.
+ * On SIGINT, SIGTERM or SIGHUP: stop accepting requests by closing the transport, give writes already in flight what is left of ten seconds
+ * to be recorded, then exit 0. The close shares that budget: a host that has stopped reading stdout can keep a close from ever settling, and
+ * that must not keep the process alive past the budget. A second signal exits 130 at once, so a stuck stop can always be forced.
  */
 export function installGracefulStop(handle: { close(): Promise<void> }, hooks: StopHooks = {}): void {
   const on = hooks.on ?? ((signal, listener) => { process.on(signal, listener); });
   const exit = hooks.exit ?? ((code) => process.exit(code));
   const drain = hooks.drain ?? drainInFlight;
+  const budget = hooks.drainMs ?? 10_000;
   let stopping = false;
   let exited = false;
   const finish = (code: number): void => {
@@ -66,12 +68,15 @@ export function installGracefulStop(handle: { close(): Promise<void> }, hooks: S
     }
     stopping = true;
     void (async () => {
-      try {
-        await handle.close();
-      } catch (e) {
+      const started = Date.now();
+      const closed = new Promise<void>((resolve) => { resolve(handle.close()); }).catch((e: unknown) => {
         debug('stdio close failed', { error: e instanceof Error ? e.name : 'unknown' });
-      }
-      await drain(hooks.drainMs ?? 10_000).catch(() => undefined);
+      });
+      let timer: NodeJS.Timeout | undefined;
+      const spent = new Promise<void>((resolve) => { timer = setTimeout(resolve, budget); });
+      await Promise.race([closed, spent]);
+      clearTimeout(timer);
+      await drain(Math.max(0, budget - (Date.now() - started))).catch(() => undefined);
       finish(0);
     })();
   };
