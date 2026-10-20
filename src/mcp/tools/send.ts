@@ -78,6 +78,12 @@ function asUncertain(e: unknown): AgentError {
 /** The id wacli reported, or an empty string when its answer carries none. */
 const idOf = (res: Partial<WacliSendResult> | null | undefined): string => (typeof res?.id === 'string' ? res.id : '');
 
+/**
+ * The roots as they really are on disk, so a root under a symlinked directory (macOS /tmp and /var, a linked Outbox) matches real file
+ * paths in our own check and in the check wacli makes with the same list. A root that does not exist is kept as configured.
+ */
+const realRoots = (roots: string[]): Promise<string[]> => Promise.all(roots.map((root) => realpath(root).catch(() => root)));
+
 /** What a file send will read: where the file really is, how big it is and when it last changed. Null when it cannot be found. */
 async function fileFacts(file: string): Promise<Pick<FileSend, 'realPath' | 'size' | 'mtimeMs'> | null> {
   try {
@@ -246,7 +252,8 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         recipient = await deps.resolver.resolve(a.to, { exact: true });
         // One snapshot of the policy serves the file check, the decision and the roots handed to wacli, so they cannot disagree.
         const policy = await deps.loadPolicy();
-        const facts = (await fileInsideRoots(a.path, policy.writes.fileRoots)) ? await fileFacts(a.path) : null;
+        const roots = await realRoots(policy.writes.fileRoots);
+        const facts = (await fileInsideRoots(a.path, roots)) ? await fileFacts(a.path) : null;
         // Without facts the file is treated as outside the roots, so the gate refuses before these placeholder values are looked at.
         const send: FileSend = { ...(facts ?? { realPath: a.path, size: 0, mtimeMs: 0 }), caption: a.caption, as: a.as, filename: a.filename };
         const state = fileState(recipient, send);
@@ -258,7 +265,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         if (a.caption) argv.push(`--caption=${a.caption}`);
         if (a.as && a.as !== 'auto') argv.push(`--as=${a.as}`);
         if (a.filename) argv.push(`--filename=${a.filename}`);
-        const env: Record<string, string> = policy.writes.fileRoots.length > 0 ? { WACLI_MEDIA_ROOTS: policy.writes.fileRoots.join(path.delimiter) } : {};
+        const env: Record<string, string> = roots.length > 0 ? { WACLI_MEDIA_ROOTS: roots.join(path.delimiter) } : {};
         await attempt('send_file', recipient, { file: a.path, text: a.caption });
         const id = idOf(await write<Partial<WacliSendResult> | null>(progress, argv, { env }));
         await record({ ...base('send_file', recipient), outcome: 'sent', ...(id ? { message_id: id } : {}), file: a.path, text: a.caption });

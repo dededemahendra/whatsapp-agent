@@ -195,7 +195,7 @@ describe('send_file', () => {
       expect(r.isError).toBeFalsy();
       const [send] = (await h.argv()).filter((x) => x.key === 'send file');
       expect(send!.argv.slice(3)).toEqual(['send', 'file', '--to=61400000001@s.whatsapp.net', `--file=${await realpath(file)}`, '--caption=the report', '--as=document']);
-      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(outbox);
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(await realpath(outbox));
       expect(h.audits.at(-1)).toMatchObject({ tool: 'send_file', outcome: 'sent', file });
     } finally {
       await removeTmp(outbox);
@@ -693,7 +693,7 @@ describe('send_file hands wacli the file it vetted', () => {
       const [send] = (await h.argv()).filter((x) => x.key === 'send file');
       expect(send!.argv).toContain(`--file=${await realpath(real)}`);
       expect(send!.argv.some((a) => a === `--file=${link}`)).toBe(false);
-      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(outbox);
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(await realpath(outbox));
       expect(h.audits.at(-1)).toMatchObject({ tool: 'send_file', outcome: 'sent', file: link });
     } finally {
       await removeTmp(outbox);
@@ -730,10 +730,86 @@ describe('send_file hands wacli the file it vetted', () => {
       expect(r.isError).toBeFalsy();
       expect(loads).toBe(2);
       const [send] = (await h.argv()).filter((x) => x.key === 'send file');
-      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(outbox);
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(await realpath(outbox));
     } finally {
       await removeTmp(outbox);
     }
+  });
+});
+
+describe('send_file resolves the roots it checks and passes', () => {
+  /** base/real is a folder, base/link a symlink to it. */
+  async function withLink(fn: (base: string, real: string, link: string) => Promise<void>): Promise<void> {
+    const base = await makeTmp('wa-roots-');
+    try {
+      const real = path.join(base, 'real');
+      const link = path.join(base, 'link');
+      await mkdir(real);
+      await symlink(real, link);
+      await fn(base, real, link);
+    } finally {
+      await removeTmp(base);
+    }
+  }
+  const sendFiles = async () => (await h.argv()).filter((x) => x.key === 'send file');
+
+  it('matches a file in the folder a symlinked root points to, and gives wacli the resolved root', async () => {
+    await withLink(async (_base, real, link) => {
+      const file = path.join(real, 'report.pdf');
+      await writeFile(file, 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [link] }) });
+      const r = await h.call('send_file', { to: 'Alice', path: file });
+      expect(r.isError).toBeFalsy();
+      const [send] = await sendFiles();
+      expect(send!.argv).toContain(`--file=${await realpath(file)}`);
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(await realpath(link));
+      expect(send!.env.WACLI_MEDIA_ROOTS).not.toBe(link);
+    });
+  });
+
+  it('matches the same file named through the link', async () => {
+    await withLink(async (_base, real, link) => {
+      await writeFile(path.join(real, 'report.pdf'), 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [link] }) });
+      const r = await h.call('send_file', { to: 'Alice', path: path.join(link, 'report.pdf') });
+      expect(r.isError).toBeFalsy();
+      const [send] = await sendFiles();
+      expect(send!.argv).toContain(`--file=${await realpath(path.join(real, 'report.pdf'))}`);
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(await realpath(link));
+    });
+  });
+
+  it('passes a root that does not exist exactly as configured, beside the resolved ones in order', async () => {
+    await withLink(async (base, real, link) => {
+      const file = path.join(real, 'report.pdf');
+      await writeFile(file, 'pdf');
+      const missing = path.join(base, 'not-made-yet');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [missing, link] }) });
+      const r = await h.call('send_file', { to: 'Alice', path: file });
+      expect(r.isError).toBeFalsy();
+      const [send] = await sendFiles();
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe([missing, await realpath(link)].join(path.delimiter));
+    });
+  });
+
+  it('does not let a root that does not exist admit a file', async () => {
+    await withLink(async (base, real) => {
+      const file = path.join(real, 'report.pdf');
+      await writeFile(file, 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [path.join(base, 'not-made-yet')] }) });
+      expect(errorOf(await h.call('send_file', { to: 'Alice', path: file })).error).toBe('file_outside_roots');
+      expect(await sendFiles()).toHaveLength(0);
+    });
+  });
+
+  it('still refuses a file outside a symlinked root', async () => {
+    await withLink(async (base, _real, link) => {
+      const outside = path.join(base, 'outside.pdf');
+      await writeFile(outside, 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [link] }) });
+      expect(errorOf(await h.call('send_file', { to: 'Alice', path: outside })).error).toBe('file_outside_roots');
+      expect(await sendFiles()).toHaveLength(0);
+    });
   });
 });
 
