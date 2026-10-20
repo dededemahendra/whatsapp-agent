@@ -673,3 +673,10 @@ overrides the earlier text where they differ.
   people. `policy allow <name>` resolves the name once through the resolver
   and stores the canonical JID; `policy show` flags entries that are neither
   a phone number nor a JID as inert.
+- A19. Shapes as built: `whatsapp_status` returns flat fields
+  (`heartbeat_at`, `heartbeat_age_seconds`, `last_sync_at`, `store_dir`,
+  `connection_state`, `session_revoked`, `counts`, `policy`) rather than a
+  nested `daemon` object; `list_groups` rows have no `participant_count`;
+  `get_group` returns `participant_count` and `participants` from the local
+  snapshot only (see A5). Schema-validation failures raised by the MCP SDK are
+  plain-text error results, not the `{"error", "message"}` JSON shape.
