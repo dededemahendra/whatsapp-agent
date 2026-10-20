@@ -65,7 +65,7 @@ Write tools, governed by the policy:
 | `react` | Emoji reaction |
 | `mark_read` | Mark a chat read |
 
-The package ships `SKILL.md`, a short guide to reading and sending carefully. Copy it to `~/.claude/skills/whatsapp-agent/SKILL.md` for Claude Code, or wherever your agent loads skills from.
+The package ships `SKILL.md`, a short guide to reading and sending carefully. Copy it to `~/.claude/skills/whatsapp-agent/SKILL.md` for Claude Code, or wherever your agent loads skills from. After a global install the file is at $(npm root -g)/whatsapp-agent/SKILL.md.
 
 ## Policy
 
