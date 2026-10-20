@@ -5,7 +5,7 @@ import * as z from 'zod/v4';
 import { AgentError, toToolError } from '../../errors.js';
 import { debug, warn } from '../../log.js';
 import { auditInput, type AuditRecord } from '../../policy/audit.js';
-import { DENY_MESSAGES, decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
+import { DENY_MESSAGES, decide, isInsideRoot, type Decision, type WriteTool } from '../../policy/engine.js';
 import type { Policy } from '../../policy/schema.js';
 import type { Resolved } from '../../wacli/resolve.js';
 import { SEND_UNCERTAIN, type RunOptions } from '../../wacli/runner.js';
@@ -258,7 +258,10 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         // One snapshot of the policy serves the file check, the decision and the roots handed to wacli, so they cannot disagree.
         const policy = await deps.loadPolicy();
         const roots = await realRoots(policy.writes.fileRoots);
-        const facts = (await fileInsideRoots(a.path, roots)) ? await fileFacts(a.path) : null;
+        // The agent's path is looked up once. The root check is made on the real path that comes back and that same path goes to wacli, so a link
+        // repointed after the check cannot make the file sent a different one.
+        const found = await fileFacts(a.path);
+        const facts = found !== null && roots.some((root) => isInsideRoot(found.realPath, root)) ? found : null;
         // Without facts the file is treated as outside the roots, so the gate refuses before these placeholder values are looked at.
         const send: FileSend = { ...(facts ?? { realPath: a.path, size: 0, mtimeMs: 0 }), caption: a.caption, as: a.as, filename: a.filename };
         const state = fileState(recipient, send);
