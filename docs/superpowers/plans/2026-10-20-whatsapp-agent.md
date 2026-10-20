@@ -6,14 +6,14 @@
 
 **Architecture:** A TypeScript Node package. The MCP server maps each tool to one `wacli` invocation spawned with `execFile` (never a shell), reads via `--read-only --json`, and gates writes through a pure policy engine that can return an MCP `input_required` confirmation. A separate `daemon` command supervises `wacli sync --follow`. Nothing touches wacli's SQLite files.
 
-**Tech Stack:** Node 22+, TypeScript 7 (`tsc` emit, ESM, NodeNext), `@modelcontextprotocol/server` 2.3 (MCP spec 2026-07-28, with legacy shim), `zod` 4, `commander` 15, `vitest` 5, pnpm 12. External runtime dependency: `wacli` 0.22.0 or newer (Go binary from Homebrew or `go install`).
+**Tech Stack:** Node 22.12+, TypeScript 7 (`tsc` emit, ESM, NodeNext), `@modelcontextprotocol/server` 2.3 (MCP spec 2026-07-28, with legacy shim), `zod` 4, `commander` 15, `vitest` 5, pnpm 12. External runtime dependency: `wacli` 0.22.0 or newer (Go binary from Homebrew or `go install`).
 
 **Spec:** `docs/superpowers/specs/2026-10-20-whatsapp-agent-design.md`
 
 ## Global Constraints
 
 - Package name `whatsapp-agent`, unscoped, MIT, version `0.1.0`; repo is public on GitHub account `dededemahendra`; commits are Conventional Commits.
-- Node engines `>=22`; CI matrix Node 22, 24, 26. (Spec said `>=20`; Node 20 reached end of life in April 2026. Recorded as amendment A1 in Task 1.)
+- Node engines `>=22.12.0` (the floor commander 15 and vitest 5 require); CI matrix Node 22, 24, 26. (Spec said `>=20`; Node 20 reached end of life in April 2026. Recorded as amendment A1 in Task 1.)
 - Build is plain `tsc` emit to `dist/`, no bundler; the published `bin` is `bin/whatsapp-agent.mjs`, a two-line shim that imports `../dist/cli.js`. (Amendment A2.)
 - Minimum wacli version `0.22.0`, read from the plain-text output of `wacli version` (it has no `--json`). (Amendment A3.)
 - Every wacli invocation: `execFile(bin, argv)` with an argv array. Any value that originates from the model is passed as `--flag=value` or after a `--` separator, never as a bare token that could be parsed as a flag.
@@ -57,8 +57,9 @@ Append to the end of `docs/superpowers/specs/2026-10-20-whatsapp-agent-design.md
 Facts learnt from the wacli and MCP SDK sources while writing the plan. Each
 overrides the earlier text where they differ.
 
-- A1. Node engines are `>=22` and CI runs Node 22, 24 and 26. Node 20 reached
-  end of life in April 2026.
+- A1. Node engines are `>=22.12.0` (the floor commander 15 and vitest 5
+  require) and CI runs Node 22, 24 and 26. Node 20 reached end of life in
+  April 2026.
 - A2. No bundler. `tsc` emits ESM to `dist/`; `bin/whatsapp-agent.mjs` is a
   shim that imports `dist/cli.js`. `tsdown` is dropped.
 - A3. `wacli version` prints plain text (for example `0.22.0`) and has no
@@ -114,7 +115,7 @@ overrides the earlier text where they differ.
   "type": "module",
   "bin": { "whatsapp-agent": "bin/whatsapp-agent.mjs" },
   "files": ["bin", "dist", "SKILL.md", "README.md", "CHANGELOG.md", "LICENSE"],
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.12.0" },
   "packageManager": "pnpm@12.9.1",
   "repository": { "type": "git", "url": "git+https://github.com/dededemahendra/whatsapp-agent.git" },
   "keywords": ["whatsapp", "mcp", "agent", "wacli", "cli"],
@@ -5609,7 +5610,7 @@ wacli and this tool use the WhatsApp Web protocol through an unofficial client. 
    { "mcpServers": { "whatsapp": { "command": "npx", "args": ["-y", "whatsapp-agent", "mcp"] } } }
    ```
 
-Requires Node 22 or newer and wacli 0.22.0 or newer.
+Requires Node 22.12 or newer and wacli 0.22.0 or newer.
 
 ## What the agent can do
 
