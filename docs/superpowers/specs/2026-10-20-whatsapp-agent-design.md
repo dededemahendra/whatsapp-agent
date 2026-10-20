@@ -304,9 +304,9 @@ Field meanings:
 - `writes.confirm`: `always` prompts for every send and reaction;
   `unlisted` prompts unless the recipient matches `writes.allow`; `never`
   never prompts. `mark_read` never prompts.
-- `writes.allow`: entries are phone numbers (normalised to digits), JIDs, or
-  exact chat or contact names (case-insensitive). Matching is against the
-  resolved recipient.
+- `writes.allow`: entries are phone numbers (normalised to digits) or JIDs,
+  canonicalised on both sides and matched against the resolved recipient.
+  Name entries never match (see A18); `policy allow <name>` stores the JID.
 - `writes.groups`: when false, any write whose resolved kind is `group` is
   refused with `GroupsDisabled`.
 - `writes.rateLimit`: applies to `send_text`, `send_file` and `react`.
