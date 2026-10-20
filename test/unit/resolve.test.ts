@@ -270,3 +270,62 @@ describe('the user part of a JID', () => {
     expect((await resolver().resolve('120363000000000001@g.us')).kind).toBe('group');
   });
 });
+
+describe('resolver pins', () => {
+  const envelope = (rows: unknown[]) => JSON.stringify({ success: true, data: rows, error: null });
+
+  it('pickUnique reports two chats with the same name as many, in list order', () => {
+    const first = { jid: 'a@s.whatsapp.net', name: 'Mum', kind: 'user' as const };
+    const second = { jid: 'b@g.us', name: 'Mum', kind: 'group' as const };
+    expect(pickUnique([first, second], 'mum')).toEqual({ kind: 'many', candidates: [first, second] });
+  });
+
+  it('sends an input that starts with dashes as --query=--help for chats and after -- for contacts', async () => {
+    await expect(resolver({ FAKE_WACLI_EMPTY: 'chats list' }).resolve('--help')).rejects.toMatchObject({ code: 'not_found' });
+    const recs = await readArgvLog(log);
+    expect(recs.map((r) => r.argv.slice(4))).toEqual([
+      ['chats', 'list', '--query=--help', '--limit=50'],
+      ['contacts', 'search', '--limit=50', '--', '--help'],
+    ]);
+  });
+
+  it('maps newsletter, broadcast and lid JIDs to their kinds, by suffix when wacli has no row', async () => {
+    expect(await resolver().resolve('120363000000000009@newsletter')).toEqual({ jid: '120363000000000009@newsletter', name: null, kind: 'channel' });
+    expect(await resolver().resolve('status@broadcast')).toEqual({ jid: 'status@broadcast', name: null, kind: 'broadcast' });
+    expect(await resolver().resolve('100000000000001@lid')).toEqual({ jid: '100000000000001@lid', name: null, kind: 'user' });
+  });
+
+  it('maps them from the wacli row, with its name, when there is one', async () => {
+    const row = (jid: string, kind: string, name: string) => ({ jid, kind, name, last_message_ts: '2026-10-19T09:00:00Z', archived: false, pinned: false, muted_until: 0, unread: false, unread_count: 0 });
+    const dir = await fixturesWith({
+      'chats_list.json': envelope([row('120363000000000009@newsletter', 'newsletter', 'News'), row('status@broadcast', 'broadcast', 'Status'), row('100000000000001@lid', 'dm', 'Lid Person')]),
+    });
+    try {
+      const r = resolver({ FAKE_WACLI_FIXTURES: dir });
+      expect(await r.resolve('120363000000000009@newsletter')).toEqual({ jid: '120363000000000009@newsletter', name: 'News', kind: 'channel' });
+      expect(await r.resolve('status@broadcast')).toEqual({ jid: 'status@broadcast', name: 'Status', kind: 'broadcast' });
+      expect(await r.resolve('100000000000001@lid')).toEqual({ jid: '100000000000001@lid', name: 'Lid Person', kind: 'user' });
+    } finally {
+      await removeTmp(dir);
+    }
+  });
+
+  it('is ambiguous in the contacts branch when no chat matches and several contacts partly match', async () => {
+    const contact = (n: number, name: string) => ({ jid: `614000000${n}0@s.whatsapp.net`, phone: `+614000000${n}0`, name, alias: '', system_name: '', updated_at: '2026-10-19T08:00:00Z' });
+    const dir = await fixturesWith({ 'contacts_search.json': envelope([contact(1, 'Sam Jones'), contact(2, 'Samantha Lee')]) });
+    try {
+      await expect(resolver({ FAKE_WACLI_FIXTURES: dir, FAKE_WACLI_EMPTY: 'chats list' }).resolve('sam')).rejects.toMatchObject({
+        code: 'ambiguous_recipient',
+        message: expect.stringContaining('"sam" matches 2 chats or contacts'),
+        details: {
+          candidates: [
+            { jid: '61400000010@s.whatsapp.net', name: 'Sam Jones', kind: 'user', matched_on: 'name' },
+            { jid: '61400000020@s.whatsapp.net', name: 'Samantha Lee', kind: 'user', matched_on: 'name' },
+          ],
+        },
+      });
+    } finally {
+      await removeTmp(dir);
+    }
+  });
+});
