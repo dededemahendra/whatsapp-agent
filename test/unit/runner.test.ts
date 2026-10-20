@@ -1,3 +1,4 @@
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AgentError } from '../../src/errors.js';
@@ -54,6 +55,17 @@ describe('createRunner against the fake wacli', () => {
     await expect(failing.read(['doctor'])).rejects.toMatchObject({
       code: 'wacli_error',
       message: expect.not.stringContaining('may have gone through'),
+    });
+  });
+
+  it('marks a write whose envelope reports failure as outcome-uncertain', async () => {
+    const dir = path.join(tmp, 'fixtures');
+    await mkdir(dir);
+    await writeFile(path.join(dir, 'send_text.json'), '{"success":false,"data":null,"error":"stale session"}\n');
+    await expect(runner({ FAKE_WACLI_FIXTURES: dir }).write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.stringContaining('stale session. The outcome is uncertain'),
+      details: expect.objectContaining({ outcome_uncertain: true }),
     });
   });
 

@@ -125,7 +125,8 @@ export function classifyFailure(code: number, stdout: string, stderr: string): A
 
 function markUncertain(err: AgentError): AgentError {
   if (err.code !== 'wacli_error' && err.code !== 'timeout') return err;
-  const message = err.message.includes('may have gone through') ? err.message : `${err.message} ${SEND_UNCERTAIN}`;
+  const base = err.message.replace(/[\s.]+$/, '');
+  const message = err.message.includes('may have gone through') ? err.message : `${base}. ${SEND_UNCERTAIN}`;
   return new AgentError(err.code, message, { ...err.details, outcome_uncertain: true });
 }
 
@@ -152,7 +153,11 @@ export function createRunner(cfg: RunnerConfig): Runner {
       const err = classifyFailure(r.code, r.stdout, r.stderr);
       throw mode === 'write' ? markUncertain(err) : err;
     }
-    return parseEnvelope<T>(r.stdout, r.stderr);
+    try {
+      return parseEnvelope<T>(r.stdout, r.stderr);
+    } catch (e) {
+      throw mode === 'write' && e instanceof AgentError ? markUncertain(e) : e;
+    }
   }
 
   return {
