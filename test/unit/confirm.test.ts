@@ -211,6 +211,7 @@ describe('confirmation prompts', () => {
     expect(describeTarget(family)).toBe('group Family (120363000000000001@g.us)');
     expect(describeTarget(unnamed)).toBe('61400000009@s.whatsapp.net');
     expect(describeTarget({ ...unnamed, kind: 'group', jid: '120363000000000002@g.us' })).toBe('group 120363000000000002@g.us');
+    expect(describeTarget({ ...alice, name: '\u202e\u0007  \n' })).toBe('61400000001@s.whatsapp.net');
   });
 
   it('cleans a display name before it reaches the prompt', () => {

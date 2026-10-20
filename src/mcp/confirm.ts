@@ -61,7 +61,8 @@ export function sanitiseName(s: string, max = 80): string {
 /** Who a prompt is about: the cleaned display name and the JID, with groups called groups. */
 export function describeTarget(r: Resolved): string {
   const jid = sanitiseName(r.jid);
-  return `${r.kind === 'group' ? 'group ' : ''}${r.name ? `${sanitiseName(r.name)} (${jid})` : jid}`;
+  const name = r.name ? sanitiseName(r.name) : '';
+  return `${r.kind === 'group' ? 'group ' : ''}${name ? `${name} (${jid})` : jid}`;
 }
 
 export type ConfirmKind = 'text' | 'file' | 'react';
