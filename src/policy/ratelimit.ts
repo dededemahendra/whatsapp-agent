@@ -78,14 +78,21 @@ const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  */
 async function withLock<T>(file: string, tuning: LockTuning, fn: () => Promise<T>): Promise<T> {
   const lock = `${file}.lock`;
-  await ensurePrivateDir(path.dirname(file));
+  // Anything that stops the lock from being made, other than somebody else holding it, is a state the send is refused over, like an unreadable file.
+  const unlockable = (e: unknown): AgentError =>
+    new AgentError('invalid_input', `Could not lock the rate-limit state at ${file}: ${e instanceof Error ? e.message : String(e)}`);
+  try {
+    await ensurePrivateDir(path.dirname(file));
+  } catch (e) {
+    throw unlockable(e);
+  }
   const deadline = Date.now() + tuning.lockWaitMs;
   for (;;) {
     let handle: FileHandle;
     try {
       handle = await open(lock, 'wx', 0o600);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw unlockable(e);
       const age = await stat(lock).then((s) => Date.now() - s.mtimeMs, () => null);
       if (age !== null && age > tuning.lockStaleMs) {
         await unlink(lock).catch(() => undefined);

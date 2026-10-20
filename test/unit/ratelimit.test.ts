@@ -201,3 +201,60 @@ describe('rate limiter lock and temp files', () => {
     await waitFor(async () => (await readdir(tmp)).sort().join() === 'rl.json', { what: 'the directory to hold only the state file' });
   });
 });
+
+describe('rate limiter when the lock cannot be created', () => {
+  const isRoot = process.getuid?.() === 0;
+  const both = (rl: ReturnType<typeof createRateLimiter>) => [() => rl.snapshot(t0), () => rl.record(t0)];
+
+  // The state file's own name is allowed, but with ".lock" added it is one character too long: creating the lock fails, and it is not EEXIST.
+  it('refuses with invalid_input when the lock file itself cannot be created (its name is too long), and leaves nothing behind', async () => {
+    const file = path.join(tmp, `${'x'.repeat(252)}.json`.slice(0, 252));
+    expect(path.basename(file)).toHaveLength(252);
+    for (const op of both(createRateLimiter(file))) {
+      const err = await op().catch((e: unknown) => e) as AgentError;
+      expect(err).toMatchObject({ name: 'AgentError', code: 'invalid_input' });
+      expect(err.message.startsWith(`Could not lock the rate-limit state at ${file}: `)).toBe(true);
+      expect(err.message).toContain('ENAMETOOLONG');
+    }
+    expect(await readdir(tmp)).toEqual([]);
+  });
+
+  it.skipIf(isRoot)('refuses with invalid_input when the folder cannot be made because the one above it is read-only (EACCES)', async () => {
+    const parent = path.join(tmp, 'readonly');
+    await mkdir(parent);
+    const file = path.join(parent, 'data', 'rl.json');
+    await chmod(parent, 0o500);
+    try {
+      for (const op of both(createRateLimiter(file))) {
+        const err = await op().catch((e: unknown) => e) as AgentError;
+        expect(err).toMatchObject({ name: 'AgentError', code: 'invalid_input' });
+        expect(err.message.startsWith(`Could not lock the rate-limit state at ${file}: `)).toBe(true);
+        expect(err.message).toContain('EACCES');
+      }
+    } finally {
+      await chmod(parent, 0o700);
+    }
+    expect(await readdir(parent)).toEqual([]);
+  });
+
+  it('refuses with invalid_input when the folder cannot be made because a file is in the way, and leaves nothing behind', async () => {
+    const blocker = path.join(tmp, 'blocker');
+    await writeFile(blocker, 'not a folder');
+    const file = path.join(blocker, 'sub', 'rl.json');
+    for (const op of both(createRateLimiter(file))) {
+      const err = await op().catch((e: unknown) => e) as AgentError;
+      expect(err).toMatchObject({ name: 'AgentError', code: 'invalid_input' });
+      expect(err.message.startsWith(`Could not lock the rate-limit state at ${file}: `)).toBe(true);
+      expect(err.message).toMatch(/ENOTDIR|EEXIST/);
+    }
+    expect((await readdir(tmp)).sort()).toEqual(['blocker']);
+  });
+
+  it('still reports a lock that stays held as before, and a lock that is simply there as a wait', async () => {
+    const file = path.join(tmp, 'rl.json');
+    await writeFile(`${file}.lock`, 'busy', { flag: 'wx' });
+    const err = await createRateLimiter(file, { lockWaitMs: 150 }).snapshot(t0).catch((e: unknown) => e) as AgentError;
+    expect(err).toMatchObject({ code: 'invalid_input' });
+    expect(err.message).toContain('has been held for more than');
+  });
+});

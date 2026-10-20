@@ -1,7 +1,8 @@
-import { chmod, copyFile, mkdir, realpath, symlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readdir, realpath, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentError } from '../../src/errors.js';
+import { createRateLimiter } from '../../src/policy/ratelimit.js';
 import { savePolicy, type Policy } from '../../src/policy/schema.js';
 import { createRunner, SEND_UNCERTAIN } from '../../src/wacli/runner.js';
 import { FAKE_WACLI, fakeEnv, fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
@@ -129,6 +130,24 @@ describe('send_text', () => {
     expect(errorOf(r)).toMatchObject({ error: 'invalid_input', message: expect.stringContaining('Could not read the rate-limit state at') });
     expect(await sendArgv()).toHaveLength(0);
     expect(h.audits.at(-1)).toMatchObject({ tool: 'send_text', outcome: 'failed', reason: 'invalid_input' });
+  });
+
+  it('refuses a send when the rate-limit lock cannot be created, and sends nothing', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    // A lock name that is too long to create, and a folder that cannot be made because a file is in the way.
+    const tooLong = path.join(h.tmp, 'x'.repeat(252));
+    const blocker = path.join(h.tmp, 'blocker');
+    await writeFile(blocker, 'not a folder');
+    const unmakeable = path.join(blocker, 'sub', 'rate-limit.json');
+    for (const file of [tooLong, unmakeable]) {
+      h.deps.rateLimiter = createRateLimiter(file);
+      const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+      expect(r.isError).toBe(true);
+      expect(errorOf(r)).toMatchObject({ error: 'invalid_input', message: expect.stringContaining(`Could not lock the rate-limit state at ${file}: `) });
+    }
+    expect(await sendArgv()).toHaveLength(0);
+    expect(h.audits.map((a) => [a.outcome, a.reason])).toEqual([['failed', 'invalid_input'], ['failed', 'invalid_input']]);
+    expect((await readdir(h.tmp)).filter((n) => n.endsWith('.lock') || n.endsWith('.tmp'))).toEqual([]);
   });
 
   it('re-checks every rule when the confirmation answer arrives', async () => {
