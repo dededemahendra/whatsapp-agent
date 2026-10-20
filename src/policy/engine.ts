@@ -27,13 +27,14 @@ export type Decision =
   | { kind: 'confirm' }
   | { kind: 'deny'; code: DenyCode; message: string; retryAfterSeconds?: number };
 
+/** Every hint that names a command is worded as a request to the person, never as something the agent can run itself. */
 export const DENY_MESSAGES: Record<DenyCode, string> = {
-  writes_disabled: 'Sending is turned off in the policy. The person can enable it with: whatsapp-agent policy enable',
+  writes_disabled: 'Sending is turned off in the policy. Ask the person to run: whatsapp-agent policy enable',
   unsupported_target: 'Only people and groups can receive messages. Channels, broadcast lists and unknown chat types are read-only in this version.',
-  groups_disabled: 'Sending to groups is turned off. The person can enable it with: whatsapp-agent policy set groups on',
-  file_outside_roots: 'That file is outside the allowed folders. The person can add a folder with: whatsapp-agent policy add-file-root <dir>',
+  groups_disabled: 'Sending to groups is turned off. Ask the person to run: whatsapp-agent policy set groups on',
+  file_outside_roots: 'That file is outside the allowed folders. Ask the person to run: whatsapp-agent policy add-file-root <dir>',
   rate_limited: 'Send rate limit reached. Wait before sending again.',
-  confirmation_unavailable: 'This send needs the person to confirm, but this client cannot show a confirmation form. The person can allowlist the recipient with: whatsapp-agent policy allow <recipient>, and set: whatsapp-agent policy set confirm unlisted',
+  confirmation_unavailable: 'This send needs the person to confirm, but this client cannot show a confirmation form. Ask the person to run: whatsapp-agent policy allow <recipient>, then: whatsapp-agent policy set confirm unlisted',
   confirmation_declined: 'The person declined. Nothing was sent.',
 };
 

@@ -1,7 +1,7 @@
 import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { decide, fileInsideRoots, isInsideRoot, matchesAllow, sameAllowTarget, type DecideInput } from '../../src/policy/engine.js';
+import { DENY_MESSAGES, decide, fileInsideRoots, isInsideRoot, matchesAllow, sameAllowTarget, type DecideInput } from '../../src/policy/engine.js';
 import { DEFAULT_POLICY, type Policy } from '../../src/policy/schema.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
@@ -105,6 +105,35 @@ describe('decide', () => {
   });
   it('re-checks earlier rules on re-entry', () => {
     expect(decide(input({ answer: 'accepted', rate: { countLastHour: 20, secondsSinceLast: 10, secondsUntilWindowFrees: 100 } }))).toMatchObject({ kind: 'deny', code: 'rate_limited' });
+  });
+});
+
+describe('the hints in a denial', () => {
+  it('ask the person to run the command, so an agent does not read them as instructions to itself', () => {
+    const withCommand = Object.entries(DENY_MESSAGES).filter(([, m]) => m.includes('whatsapp-agent policy'));
+    expect(withCommand.map(([code]) => code).sort()).toEqual(['confirmation_unavailable', 'file_outside_roots', 'groups_disabled', 'writes_disabled']);
+    for (const [code, message] of withCommand) {
+      expect(message, code).toContain('Ask the person to run: whatsapp-agent policy');
+      expect(message, code).not.toMatch(/the person can|you can|run it yourself/i);
+    }
+  });
+
+  it('keeps each command exactly as the person has to type it', () => {
+    expect(DENY_MESSAGES.writes_disabled).toBe('Sending is turned off in the policy. Ask the person to run: whatsapp-agent policy enable');
+    expect(DENY_MESSAGES.groups_disabled).toBe('Sending to groups is turned off. Ask the person to run: whatsapp-agent policy set groups on');
+    expect(DENY_MESSAGES.file_outside_roots).toBe('That file is outside the allowed folders. Ask the person to run: whatsapp-agent policy add-file-root <dir>');
+    expect(DENY_MESSAGES.confirmation_unavailable).toBe(
+      'This send needs the person to confirm, but this client cannot show a confirmation form. Ask the person to run: whatsapp-agent policy allow <recipient>, then: whatsapp-agent policy set confirm unlisted',
+    );
+  });
+
+  it('carry no hint at all where there is no command to run', () => {
+    for (const code of ['unsupported_target', 'rate_limited', 'confirmation_declined'] as const) expect(DENY_MESSAGES[code]).not.toContain('whatsapp-agent');
+  });
+
+  it('reach the agent through the decision', () => {
+    const d = decide(input({ policy: DEFAULT_POLICY }));
+    expect(d).toMatchObject({ kind: 'deny', code: 'writes_disabled', message: expect.stringContaining('Ask the person to run: whatsapp-agent policy enable') });
   });
 });
 
