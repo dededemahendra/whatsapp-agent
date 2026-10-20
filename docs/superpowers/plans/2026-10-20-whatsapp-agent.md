@@ -3985,7 +3985,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   /** Audit failures never change a tool result: a completed send must not be reported as failed. */
   async function record(rec: AuditRecord): Promise<void> {
     try {
-      await record(rec);
+      await deps.audit(rec);
     } catch (e) {
       debug('audit append failed', { tool: rec.tool, outcome: rec.outcome, error: e instanceof Error ? e.message : String(e) });
     }
