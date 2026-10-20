@@ -1,4 +1,3 @@
-import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { Resolved } from '../wacli/resolve.js';
 import { canonicalJid, digitsOf, JID_RE, looksLikePhone } from '../wacli/resolve.js';
@@ -109,22 +108,4 @@ export function isInsideRoot(realPath: string, realRoot: string): boolean {
   const rel = path.relative(realRoot, realPath);
   // `..notes.txt` is a file in the root; only `..` itself, or `..` followed by a separator, leaves it.
   return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
-}
-
-export async function fileInsideRoots(filePath: string, roots: string[]): Promise<boolean> {
-  let real: string;
-  try {
-    real = await realpath(filePath);
-  } catch {
-    return false;
-  }
-  for (const root of roots) {
-    try {
-      const realRoot = await realpath(root);
-      if (isInsideRoot(real, realRoot)) return true;
-    } catch {
-      // missing root: skip
-    }
-  }
-  return false;
 }

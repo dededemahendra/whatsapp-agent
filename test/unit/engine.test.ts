@@ -1,9 +1,6 @@
-import { mkdir, symlink, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DENY_MESSAGES, decide, fileInsideRoots, isInsideRoot, matchesAllow, sameAllowTarget, type DecideInput } from '../../src/policy/engine.js';
+import { describe, expect, it } from 'vitest';
+import { DENY_MESSAGES, decide, isInsideRoot, matchesAllow, sameAllowTarget, type DecideInput } from '../../src/policy/engine.js';
 import { DEFAULT_POLICY, type Policy } from '../../src/policy/schema.js';
-import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 const alice = { jid: '61400000001@s.whatsapp.net', name: 'Alice', kind: 'user' as const };
 const family = { jid: '120363000000000001@g.us', name: 'Family', kind: 'group' as const };
@@ -176,10 +173,6 @@ describe('the hints in a denial', () => {
 });
 
 describe('file roots', () => {
-  let tmp: string;
-  beforeEach(async () => { tmp = await makeTmp(); });
-  afterEach(async () => { await removeTmp(tmp); });
-
   it('isInsideRoot is a pure prefix check on path segments', () => {
     expect(isInsideRoot('/a/b/c.txt', '/a/b')).toBe(true);
     expect(isInsideRoot('/a/bc/c.txt', '/a/b')).toBe(false);
@@ -194,27 +187,5 @@ describe('file roots', () => {
     expect(isInsideRoot('/a/c.txt', '/a/b')).toBe(false);
     expect(isInsideRoot('/a/b/../c.txt', '/a/b')).toBe(false);
     expect(isInsideRoot('/other', '/a/b')).toBe(false);
-  });
-
-  it('accepts a file inside a root and rejects a symlink escaping the root', async () => {
-    const root = path.join(tmp, 'root');
-    const outside = path.join(tmp, 'outside');
-    await mkdir(root); await mkdir(outside);
-    await writeFile(path.join(root, 'ok.txt'), 'x');
-    await writeFile(path.join(outside, 'secret.txt'), 'y');
-    await symlink(path.join(outside, 'secret.txt'), path.join(root, 'link.txt'));
-    expect(await fileInsideRoots(path.join(root, 'ok.txt'), [root])).toBe(true);
-    expect(await fileInsideRoots(path.join(root, 'link.txt'), [root])).toBe(false);
-    expect(await fileInsideRoots(path.join(outside, 'secret.txt'), [root])).toBe(false);
-    expect(await fileInsideRoots(path.join(root, 'ok.txt'), [])).toBe(false);
-    expect(await fileInsideRoots(path.join(root, 'ok.txt'), [path.join(tmp, 'missing'), root])).toBe(true);
-    expect(await fileInsideRoots(path.join(root, 'absent.txt'), [root])).toBe(false);
-  });
-
-  it('accepts a file inside a root whose name starts with two dots', async () => {
-    const root = path.join(tmp, 'root');
-    await mkdir(root);
-    await writeFile(path.join(root, '..notes.txt'), 'x');
-    expect(await fileInsideRoots(path.join(root, '..notes.txt'), [root])).toBe(true);
   });
 });

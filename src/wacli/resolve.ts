@@ -34,7 +34,7 @@ export type Matchable = Resolved & { alias?: string | null; system_name?: string
 /** A candidate in an ambiguous_recipient error. `matched_on` says which name matched, and appears for contacts only. */
 export type Candidate = Resolved & { matched_on?: MatchField };
 /** The most candidates an ambiguity lists. `total` counts every match, so the person is told how many there really were. */
-export const AMBIGUOUS_LIMIT = 10;
+const AMBIGUOUS_LIMIT = 10;
 
 /** `partial` appears only in exact mode: the one candidate that contains the input without matching it exactly. */
 export type PickResult =
