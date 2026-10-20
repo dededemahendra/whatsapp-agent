@@ -113,9 +113,24 @@ if (key === 'sync') {
   process.exit(0);
 }
 
+// wacli (Go) encodes an empty list as null. A message page keeps its wrapper (page, source) with messages: null.
+function emptyData(k) {
+  const f = path.join(FIXTURES, k.replaceAll(' ', '_') + '.json');
+  if (existsSync(f)) {
+    try {
+      const data = JSON.parse(readFileSync(f, 'utf8')).data;
+      if (data && typeof data === 'object' && !Array.isArray(data) && 'messages' in data) {
+        return { ...data, messages: null, ...('page' in data ? { page: { has_more: false, next_cursor: null } } : {}) };
+      }
+    } catch {
+      // no usable fixture: a plain null list
+    }
+  }
+  return null;
+}
 const emptyKeys = (process.env.FAKE_WACLI_EMPTY || '').split(',').map((s) => s.trim()).filter(Boolean);
 if (emptyKeys.includes(key)) {
-  process.stdout.write(JSON.stringify({ success: true, data: [], error: null }) + '\n');
+  process.stdout.write(JSON.stringify({ success: true, data: emptyData(key), error: null }) + '\n');
   process.exit(0);
 }
 

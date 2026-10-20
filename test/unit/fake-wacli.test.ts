@@ -27,6 +27,27 @@ describe('fake wacli', () => {
       .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('"success":false') });
   });
 
+  it('answers an empty key with data null, as wacli encodes an empty list', async () => {
+    const env = fakeEnv({ FAKE_WACLI_EMPTY: 'chats list,contacts search' });
+    for (const args of [['chats', 'list'], ['contacts', 'search', '--', 'a']]) {
+      const { stdout } = await run(FAKE_WACLI, ['--json', '--read-only', ...args], { env });
+      expect(JSON.parse(stdout)).toEqual({ success: true, data: null, error: null });
+    }
+  });
+
+  it('answers an empty message page with the usual wrapper and messages null', async () => {
+    const env = fakeEnv({ FAKE_WACLI_EMPTY: 'messages list,messages search,messages context' });
+    for (const args of [['messages', 'list', '--chat=x'], ['messages', 'search', '--', 'q']]) {
+      const { stdout } = await run(FAKE_WACLI, ['--json', '--read-only', ...args], { env });
+      expect(JSON.parse(stdout)).toMatchObject({ success: true, data: { messages: null, fts: true, page: { has_more: false, next_cursor: null } }, error: null });
+    }
+    const { stdout } = await run(FAKE_WACLI, ['--json', '--read-only', 'messages', 'context', '--chat=x', '--id=MSG1'], { env });
+    const data = JSON.parse(stdout).data;
+    expect(data.messages).toBeNull();
+    expect(data).toMatchObject({ chat_jid: expect.any(String), msg_id: expect.any(String) });
+    expect(data).not.toHaveProperty('page');
+  });
+
   it('prints a plain version', async () => {
     const { stdout } = await run(FAKE_WACLI, ['version'], { env: fakeEnv() });
     expect(stdout.trim()).toBe('0.22.0');

@@ -8,7 +8,7 @@ import { BAN_NOTICE, runSetup, type SetupIO } from '../../src/ops/setup.js';
 import { resolvePaths } from '../../src/paths.js';
 import { DEFAULT_POLICY, loadPolicy, savePolicy } from '../../src/policy/schema.js';
 import { createRunner, type Runner } from '../../src/wacli/runner.js';
-import { FAKE_WACLI, fakeEnv, makeTmp, readArgvLog, removeTmp } from '../helpers/fake.js';
+import { FAKE_WACLI, fakeEnv, fixturesWith, makeTmp, readArgvLog, removeTmp } from '../helpers/fake.js';
 
 let tmp: string;
 beforeEach(async () => { tmp = await makeTmp(); });
@@ -105,10 +105,16 @@ describe('runSetup', () => {
 
   it('runs wacli auth when not paired and reports when pairing did not complete', async () => {
     const t = io({ answers: [false] });
-    const ok = await runSetup({ io: t.io, ...opts({ FAKE_WACLI_EMPTY: 'auth status' }), service: null, isGlobal: true, flags: {} });
-    expect(t.runs).toEqual([[FAKE_WACLI, 'auth']]);
-    expect(ok).toBe(false);
-    expect(t.out.join('\n')).toContain('Pairing did not complete');
+    const dir = await fixturesWith({ 'auth_status.json': '{"success":true,"data":{"authenticated":false},"error":null}\n' });
+    try {
+      const ok = await runSetup({ io: t.io, ...opts({ FAKE_WACLI_FIXTURES: dir }), service: null, isGlobal: true, flags: {} });
+      expect(t.runs).toEqual([[FAKE_WACLI, 'auth']]);
+      expect(ok).toBe(false);
+      expect(t.out.join('\n')).toContain('Pairing did not complete');
+      expect(t.out.join('\n')).not.toContain('TypeError');
+    } finally {
+      await removeTmp(dir);
+    }
   });
 
   it('tells a non-global install how to get the service, and honours --no-service', async () => {

@@ -75,6 +75,13 @@ describe('list_chats', () => {
     expect(rec!.argv.slice(4)).toEqual(['chats', 'list', '--limit=50', '--query=fam', '--unread']);
   });
 
+  it('returns an empty chats array when wacli answers with a null list', async () => {
+    h = await makeHarness({ env: { FAKE_WACLI_EMPTY: 'chats list' } });
+    const r = await h.call('list_chats');
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toEqual({ chats: [] });
+  });
+
   it('rejects an invalid limit through the schema', async () => {
     h = await makeHarness();
     const r = await h.call('list_chats', { limit: 0 });
