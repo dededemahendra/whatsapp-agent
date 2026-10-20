@@ -25,6 +25,8 @@ wacli and this tool use the WhatsApp Web protocol through an unofficial client. 
 
    Setup checks wacli, pairs WhatsApp by showing a QR code to scan from your phone (Settings, Linked devices), writes a policy with writes off, offers to install the background sync daemon, and prints the host configuration.
 
+   `setup` accepts `--service`, `--no-service` and `--install-wacli` to answer its questions without prompting, which is what a non-interactive shell needs.
+
 3. Connect your agent host:
 
    ```
@@ -63,6 +65,8 @@ Write tools, governed by the policy:
 | `react` | Emoji reaction |
 | `mark_read` | Mark a chat read |
 
+The package ships `SKILL.md`, a short guide to reading and sending carefully. Copy it to `~/.claude/skills/whatsapp-agent/SKILL.md` for Claude Code, or wherever your agent loads skills from.
+
 ## Policy
 
 The policy lives at `~/.config/whatsapp-agent/policy.json`. Manage it from the command line:
@@ -72,6 +76,7 @@ whatsapp-agent policy show
 whatsapp-agent policy enable              # turn write tools on
 whatsapp-agent policy set confirm always  # always | unlisted | never
 whatsapp-agent policy allow "+61 400 000 001"
+whatsapp-agent policy remove "+61 400 000 001"  # remove an allowlist entry
 whatsapp-agent policy set groups on
 whatsapp-agent policy add-file-root ~/Outbox
 whatsapp-agent policy disable
@@ -86,13 +91,15 @@ whatsapp-agent policy disable
 - Validation errors for malformed tool input come back from the MCP SDK as plain text; only tool-level errors carry the `{"error", "message"}` JSON shape.
 - Rate limit: 20 sends an hour and 5 seconds between sends by default.
 
-Changes take effect on the next tool call; no restart needed.
+Changes take effect on the next tool call; no restart needed. The exceptions are limits, account and the daemon settings, which are read at start: restart the MCP server or the daemon after changing them.
 
 ## Audit
 
 ```
 whatsapp-agent audit            # last 50 records
+whatsapp-agent audit -n 200     # 200 records instead of the default 50
 whatsapp-agent audit --since 2026-10-01 --tool send_text
+whatsapp-agent audit --json     # one JSON record per line
 ```
 
 Every attempt is recorded, including refused ones, with recipient, outcome and the text that was sent. The file is owner-only at `~/.local/share/whatsapp-agent/audit.jsonl`.
@@ -105,6 +112,7 @@ The agent reads from wacli's local mirror. Keep it fresh with the daemon:
 whatsapp-agent daemon install   # launchd on macOS, systemd on Linux
 whatsapp-agent daemon status
 whatsapp-agent daemon logs -f
+whatsapp-agent daemon logs -n 200  # last 200 lines (default 100)
 whatsapp-agent daemon uninstall
 ```
 
@@ -112,12 +120,12 @@ whatsapp-agent daemon uninstall
 
 ## Troubleshooting
 
-Run `whatsapp-agent doctor`. It prints wacli's version, pairing state, the daemon, the policy and the paths, and lists anything that needs attention with the command to fix it.
+Run `whatsapp-agent doctor`. It prints wacli's version, pairing state, the daemon, the policy and the paths, and lists anything that needs attention with the command to fix it. Use `whatsapp-agent doctor --json` for the same report as JSON.
 
 Common cases:
 
-- `not paired` or `session revoked`: run `whatsapp-agent setup` and scan the QR code again.
-- `daemon not installed`: `npm i -g whatsapp-agent` then `whatsapp-agent daemon install`.
+- Not paired, or the session was revoked: run `whatsapp-agent setup` and scan the QR code again.
+- The sync daemon is not installed: `npm i -g whatsapp-agent` then `whatsapp-agent daemon install`.
 - Reads look stale: `whatsapp-agent daemon status`, then `daemon logs`.
 - `confirmation_unavailable`: your host cannot show a confirmation form. Allowlist the recipient and set `confirm unlisted`.
 - Slow first tool call: npx downloads the package. A global install avoids it.
@@ -129,6 +137,8 @@ Common cases:
 | `WHATSAPP_AGENT_WACLI_BIN` | Path to wacli (default: `wacli` on PATH) |
 | `WHATSAPP_AGENT_CONFIG_DIR` | Policy location (default `~/.config/whatsapp-agent`) |
 | `WHATSAPP_AGENT_DATA_DIR` | Media, audit and rate-limit state (default `~/.local/share/whatsapp-agent`) |
+| `WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE` | `1` lets `daemon install` run from a checkout that is not a global install |
+| `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | Used for the defaults above when the specific overrides are unset |
 | `WHATSAPP_AGENT_LOG` | `debug` prints diagnostics on stderr (never message text) |
 
 ## Development

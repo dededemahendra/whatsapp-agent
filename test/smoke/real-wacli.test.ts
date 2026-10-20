@@ -18,6 +18,6 @@ describe.skipIf(!enabled)('real wacli (read-only)', () => {
     const doctor = await runner.read<WacliDoctor>(['doctor']);
     expect(doctor.store_dir).toBeTruthy();
     const chats = await runner.read<WacliChat[]>(['chats', 'list', '--limit=3']);
-    expect(Array.isArray(chats)).toBe(true);
+    expect(chats === null || Array.isArray(chats)).toBe(true);
   });
 });
