@@ -22,6 +22,20 @@ jobs:
         run: |
           v="v$(node -p "require('./package.json').version")"
           test "$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match $v"; exit 1; }
+      - name: Check CHANGELOG.md has a dated section for the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          heading="$(awk -v prefix="## ${version} (" 'index($0, prefix) == 1 { print; exit }' CHANGELOG.md)"
+          if [ -z "$heading" ]; then
+            echo "::error file=CHANGELOG.md::CHANGELOG.md has no '## ${version} (<date>)' section for ${GITHUB_REF_NAME}. Add it, then tag again."
+            exit 1
+          fi
+          case "$heading" in
+            *"(unreleased)"*)
+              echo "::error file=CHANGELOG.md::CHANGELOG.md still says '${heading}'. Replace (unreleased) with the release date, then tag again."
+              exit 1
+              ;;
+          esac
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build

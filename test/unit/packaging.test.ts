@@ -29,6 +29,33 @@ function stepScript(workflow: string, stepName: string): string {
   return body.join('\n');
 }
 
+interface Step { name: string | null; run: string | null; uses: string | null; text: string }
+
+/** The steps of one job in a workflow, in order. The workflow is plain block YAML, so indentation is enough: jobs at 2 spaces, steps at 6. */
+function jobSteps(workflow: string, job: string): Step[] {
+  const lines = workflow.split('\n');
+  const start = lines.findIndex((l) => l === `  ${job}:`);
+  expect(start, `a job named "${job}"`).toBeGreaterThanOrEqual(0);
+  const end = lines.findIndex((l, i) => i > start && /^ {2}\S/.test(l));
+  const body = lines.slice(start + 1, end === -1 ? lines.length : end);
+  const first = body.findIndex((l) => /^ {6}- /.test(l));
+  expect(first, `steps in job "${job}"`).toBeGreaterThanOrEqual(0);
+  const steps: string[][] = [];
+  for (const l of body.slice(first)) {
+    if (/^ {6}- /.test(l)) steps.push([l]);
+    else steps[steps.length - 1]!.push(l);
+  }
+  return steps.map((chunk) => {
+    const text = chunk.join('\n');
+    const field = (key: string): string | null => new RegExp(`^ {6}(?:- | {2})${key}: (.+)$`, 'm').exec(text)?.[1]?.trim() ?? null;
+    const runAt = chunk.findIndex((l) => /^ {6}(?:- | {2})run: \|\s*$/.test(l));
+    const run = runAt >= 0
+      ? chunk.slice(runAt + 1).filter((l, i, all) => l.trim() !== '' || all.slice(i).some((x) => x.trim() !== '')).map((l) => l.slice(10)).join('\n')
+      : field('run');
+    return { name: field('name'), run, uses: field('uses'), text };
+  });
+}
+
 describe('release workflow', () => {
   const usesLines = (text: string) => text.split('\n').filter((l) => /^\s*(-\s+)?uses:/.test(l)).map((l) => l.trim());
 
@@ -39,6 +66,63 @@ describe('release workflow', () => {
     const ci = usesLines(await read('.github/workflows/ci.yml'));
     expect(ci.length).toBeGreaterThan(0);
     for (const line of ci) expect(line).toMatch(/^(- )?uses: [\w.-]+\/[\w.-]+@v\d+$/);
+  });
+
+  describe('the changelog check before publishing', () => {
+    const dated = '# Changelog\n\n## 0.1.0 (2026-10-25)\n\n- One.\n\n## 0.0.9 (2026-01-01)\n\n- Older.\n';
+    const cases: Array<[string, string, string, boolean]> = [
+      ['a dated section', dated, 'v0.1.0', true],
+      ['the last section of the file', '# Changelog\n\n## 0.1.0 (2026-10-25)\n\n- Only.\n', 'v0.1.0', true],
+      ['a section still marked unreleased', '# Changelog\n\n## 0.1.0 (unreleased)\n\n- One.\n', 'v0.1.0', false],
+      ['no section for the tag', dated, 'v0.2.0', false],
+      ['a longer version that starts the same (0.10.0 is not 0.1.0)', '# Changelog\n\n## 0.10.0 (2026-10-25)\n\n- One.\n', 'v0.1.0', false],
+      ['an empty file', '', 'v0.1.0', false],
+    ];
+
+    async function runScript(script: string, changelog: string, ref: string): Promise<{ code: number; output: string }> {
+      await mkdir(path.join(tmp, 'runner'), { recursive: true });
+      await writeFile(path.join(tmp, 'CHANGELOG.md'), changelog);
+      try {
+        const r = await run('bash', ['-e', '-c', script], { cwd: tmp, env: { PATH: process.env.PATH ?? '', GITHUB_REF_NAME: ref, RUNNER_TEMP: path.join(tmp, 'runner') } });
+        return { code: 0, output: r.stdout + r.stderr };
+      } catch (e) {
+        const err = e as { code?: number; stdout?: string; stderr?: string };
+        return { code: err.code ?? 1, output: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+      }
+    }
+
+    it('has a step in the publish job that runs before npm publish', async () => {
+      const steps = jobSteps(await read('.github/workflows/release.yml'), 'publish');
+      const check = steps.findIndex((s) => /changelog/i.test(s.name ?? '') && /CHANGELOG\.md/.test(s.run ?? '') && /\(unreleased\)/.test(s.run ?? ''));
+      const publish = steps.findIndex((s) => /npm publish/.test(s.run ?? ''));
+      expect(check, 'a CHANGELOG check step in the publish job').toBeGreaterThanOrEqual(0);
+      expect(publish, 'the npm publish step').toBeGreaterThanOrEqual(0);
+      expect(check).toBeLessThan(publish);
+    });
+
+    it.each(cases)('the publish job check gives the right verdict for %s', async (_what, changelog, ref, passes) => {
+      const steps = jobSteps(await read('.github/workflows/release.yml'), 'publish');
+      const check = steps.find((s) => /changelog/i.test(s.name ?? ''))!;
+      const r = await runScript(check.run!, changelog, ref);
+      expect(r.code === 0, r.output).toBe(passes);
+      if (!passes) expect(r.output).toContain('::error file=CHANGELOG.md::');
+    });
+
+    it.each(cases)('the publish job check and the release notes step agree about %s', async (_what, changelog, ref) => {
+      const workflow = await read('.github/workflows/release.yml');
+      const check = jobSteps(workflow, 'publish').find((s) => /changelog/i.test(s.name ?? ''))!;
+      const notes = stepScript(workflow, 'Extract release notes from CHANGELOG.md');
+      const a = await runScript(check.run!, changelog, ref);
+      const b = await runScript(notes, changelog, ref);
+      expect(a.code === 0).toBe(b.code === 0);
+      if (a.code !== 0) expect(a.output).toBe(b.output);
+    });
+
+    it('leaves the release job extracting the notes and passing them to gh release create', async () => {
+      const steps = jobSteps(await read('.github/workflows/release.yml'), 'release');
+      expect(steps.some((s) => s.name === 'Extract release notes from CHANGELOG.md')).toBe(true);
+      expect(steps.some((s) => /gh release create .*--notes-file/.test(s.run ?? ''))).toBe(true);
+    });
   });
 
   it('creates the GitHub release from the extracted notes file, not generated notes', async () => {
