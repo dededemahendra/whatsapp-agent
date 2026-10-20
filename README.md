@@ -114,7 +114,7 @@ whatsapp-agent audit --since 2026-10-01 --tool send_text
 whatsapp-agent audit --json     # one JSON record per line
 ```
 
-Every attempt is recorded, including refused ones, with recipient, outcome and the text that was sent. The file is owner-only at `~/.local/share/whatsapp-agent/audit.jsonl`.
+Every attempt is recorded, including refused ones, with recipient, outcome and the text that was sent. A send is preceded by an `attempted` row, written just before wacli is called, and followed by a `sent` or `failed` row. If the `attempted` row cannot be written, nothing is sent. An `attempted` row with nothing after it means the outcome is unknown, so check the chat. A confirmation prompt that is never answered leaves no row. The file is owner-only at `~/.local/share/whatsapp-agent/audit.jsonl`.
 
 ## Background sync
 

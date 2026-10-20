@@ -3,7 +3,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Policy } from '../../src/policy/schema.js';
 import { fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
-import { errorOf, makeHarness, type Harness } from '../helpers/harness.js';
+import { errorOf, makeHarness, stubWrite, type Harness } from '../helpers/harness.js';
 
 let h: Harness;
 afterEach(async () => { await h?.close(); });
@@ -152,9 +152,13 @@ describe('send_text', () => {
     expect(await sendArgv()).toHaveLength(0);
   });
 
-  it('reports a completed send as sent even when the audit log cannot be written', async () => {
+  it('reports a completed send as sent even when the audit log stops working after the send', async () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
-    h.deps.audit = async () => { throw new Error('ENOSPC: no space left on device'); };
+    const write = h.deps.audit;
+    h.deps.audit = async (rec) => {
+      if (rec.outcome === 'attempted') return write(rec);
+      throw new Error('ENOSPC: no space left on device');
+    };
     const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
     expect(r.isError).toBeFalsy();
     expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0001' });
@@ -320,5 +324,126 @@ describe('the master switch comes before the recipient lookup', () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
     expect(errorOf(await h.call('send_text', { to: 'a', message: 'hello' })).error).toBe('ambiguous_recipient');
     expect((await h.argv()).map((x) => x.key)).toEqual(['chats list']);
+  });
+});
+
+describe('the attempted row', () => {
+  const rows = () => h.audits.map((a) => a.outcome);
+
+  it('comes before the call to wacli, and the sent row after it', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    let seenByWacli: string[] = [];
+    stubWrite(h, async () => {
+      seenByWacli = rows();
+      return { sent: true, to: '61400000001@s.whatsapp.net', id: 'ORDER0001' };
+    });
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBeFalsy();
+    expect(seenByWacli).toEqual(['attempted']);
+    expect(rows()).toEqual(['attempted', 'sent']);
+    expect(h.audits[0]).toMatchObject({ tool: 'send_text', outcome: 'attempted', to_jid: '61400000001@s.whatsapp.net', to_name: 'Alice', kind: 'user', text: 'hello' });
+    expect(h.audits[0]).not.toHaveProperty('message_id');
+    expect(h.audits[1]).toMatchObject({ outcome: 'sent', message_id: 'ORDER0001', text: 'hello' });
+  });
+
+  it('is followed by a failed row when wacli fails', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|usync failed' } });
+    expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'hello' })).error).toBe('wacli_error');
+    expect(rows()).toEqual(['attempted', 'failed']);
+    expect(h.audits[1]).toMatchObject({ outcome: 'failed', reason: 'wacli_error' });
+  });
+
+  it('precedes every kind of write', async () => {
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      const file = path.join(outbox, 'report.pdf');
+      await writeFile(file, 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox], rateLimit: { perHour: 50, minGapSeconds: 0 } }) });
+      const seen: string[][] = [];
+      stubWrite(h, async () => {
+        seen.push(rows());
+        return { sent: true, to: '61400000001@s.whatsapp.net', id: 'ORDER0002', ok: true };
+      });
+      await h.call('send_file', { to: 'Alice', path: file, caption: 'the report' });
+      await h.call('react', { chat: 'Alice', message_id: 'MSG1', reaction: '👍' });
+      await h.call('mark_read', { chat: 'Alice' });
+      expect(seen).toEqual([['attempted'], ['attempted', 'sent', 'attempted'], ['attempted', 'sent', 'attempted', 'sent', 'attempted']]);
+      expect(h.audits.filter((a) => a.outcome === 'attempted')).toEqual([
+        expect.objectContaining({ tool: 'send_file', file, text: 'the report' }),
+        expect.objectContaining({ tool: 'react', reaction: '👍', message_id: 'MSG1' }),
+        expect.objectContaining({ tool: 'mark_read', to_jid: '61400000001@s.whatsapp.net' }),
+      ]);
+    } finally {
+      await removeTmp(outbox);
+    }
+  });
+
+  it('is not written for a send that is denied, declined or still waiting for an answer', async () => {
+    h = await makeHarness({ policy: enabled(), manualRounds: true });
+    const waiting = await h.callRound('send_text', { to: 'Alice', message: 'hello' });
+    expect(waiting.resultType).toBe('input_required');
+    expect(h.audits).toEqual([]);
+
+    const declined = await h.callRound('send_text', { to: 'Alice', message: 'hello' }, { inputResponses: { confirm: { action: 'decline' } }, requestState: waiting.requestState });
+    expect(JSON.parse(declined.content![0]!.text!)).toMatchObject({ error: 'confirmation_declined' });
+    expect(rows()).toEqual(['denied']);
+    await h.close();
+
+    h = await makeHarness({ policy: enabled({ groups: false, confirm: 'never' }) });
+    await h.call('send_text', { to: 'Family', message: 'hi all' });
+    expect(rows()).toEqual(['denied']);
+  });
+
+  it('is written once, after the person says yes, when a prompt was shown', async () => {
+    h = await makeHarness({ policy: enabled() });
+    expect((await h.call('send_text', { to: 'Alice', message: 'hello' })).isError).toBeFalsy();
+    expect(h.elicitations).toHaveLength(1);
+    expect(rows()).toEqual(['attempted', 'sent']);
+  });
+
+  it('blocks the send when it cannot be written, and says so', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    h.deps.audit = async () => { throw new Error('ENOSPC: no space left on device'); };
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBe(true);
+    expect(errorOf(r)).toMatchObject({ error: 'invalid_input', message: expect.stringContaining('Could not write the audit log at') });
+    expect(errorOf(r).message).toContain('ENOSPC: no space left on device');
+    expect(errorOf(r).message).toContain('Nothing was sent.');
+    expect(await sendArgv()).toHaveLength(0);
+  });
+
+  it.each([
+    ['send_text', { to: 'Alice', message: 'hello' }, 'send text'],
+    ['react', { chat: 'Alice', message_id: 'MSG1', reaction: '👍' }, 'send react'],
+    ['mark_read', { chat: 'Alice' }, 'chats mark-read'],
+  ])('keeps %s from reaching wacli when the row cannot be written', async (tool, args, key) => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    h.deps.audit = async () => { throw new Error('EACCES: permission denied'); };
+    expect(errorOf(await h.call(tool, args)).error).toBe('invalid_input');
+    expect((await h.argv()).filter((x) => x.key === key)).toHaveLength(0);
+  });
+
+  it('keeps send_file from reaching wacli when the row cannot be written', async () => {
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      const file = path.join(outbox, 'report.pdf');
+      await writeFile(file, 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox] }) });
+      h.deps.audit = async () => { throw new Error('EROFS: read-only file system'); };
+      expect(errorOf(await h.call('send_file', { to: 'Alice', path: file })).error).toBe('invalid_input');
+      expect((await h.argv()).filter((x) => x.key === 'send file')).toHaveLength(0);
+    } finally {
+      await removeTmp(outbox);
+    }
+  });
+
+  it('is released from the in-flight count even when it fails', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    h.deps.audit = async () => { throw new Error('ENOSPC'); };
+    await h.call('send_text', { to: 'Alice', message: 'hello' });
+    const { drainInFlight } = await import('../../src/mcp/tools/send.js');
+    const t0 = Date.now();
+    await drainInFlight(1500);
+    expect(Date.now() - t0).toBeLessThan(700);
   });
 });

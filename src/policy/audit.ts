@@ -8,7 +8,8 @@ export interface AuditRecord {
   to_jid: string | null;
   to_name: string | null;
   kind: string | null;
-  outcome: 'sent' | 'denied' | 'failed';
+  /** `attempted` is written just before wacli is called and is followed by `sent` or `failed`; one with nothing after it means the outcome is unknown. */
+  outcome: 'attempted' | 'sent' | 'denied' | 'failed';
   reason?: string;
   message_id?: string;
   text?: string;

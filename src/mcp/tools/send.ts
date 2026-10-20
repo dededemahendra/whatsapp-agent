@@ -106,6 +106,19 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     return toToolError(new AgentError(d.code, d.message, d.retryAfterSeconds === undefined ? {} : { retry_after_seconds: d.retryAfterSeconds }));
   }
 
+  /**
+   * Writes the row that says a send is about to be handed to wacli. Unlike the rows that follow, this one is required: when it cannot be
+   * written the send does not happen, so nothing leaves unrecorded. (It comes before the send, so it never hides one that happened.)
+   */
+  async function attempt(tool: WriteTool, recipient: Resolved, extra: Partial<AuditRecord>): Promise<void> {
+    try {
+      await deps.audit({ ...base(tool, recipient), outcome: 'attempted', ...extra });
+    } catch (e) {
+      const why = (e instanceof Error ? e.message : String(e)).replace(/[\s.]+$/, '');
+      throw new AgentError('invalid_input', `Could not write the audit log at ${deps.paths.auditFile}: ${why}. Nothing was sent.`);
+    }
+  }
+
   /** The master switch, read before the recipient is looked up, so a switched-off server does not query wacli for a write it will refuse. */
   async function switchedOff(tool: WriteTool, extra: Partial<AuditRecord>): Promise<CallToolResult | null> {
     if ((await deps.loadPolicy()).writes.enabled) return null;
@@ -151,6 +164,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         if (a.reply_to_sender) argv.push(`--reply-to-sender=${a.reply_to_sender}`);
         for (const m of a.mentions ?? []) argv.push(`--mention=${m}`);
         if (a.link_preview === false) argv.push('--no-preview');
+        await attempt('send_text', recipient, { text: a.message });
         const res = await deps.runner.write<WacliSendResult>(argv);
         await record({ ...base('send_text', recipient), outcome: 'sent', message_id: res.id, text: a.message });
         return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
@@ -198,6 +212,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         if (a.as && a.as !== 'auto') argv.push(`--as=${a.as}`);
         if (a.filename) argv.push(`--filename=${a.filename}`);
         const env: Record<string, string> = policy.writes.fileRoots.length > 0 ? { WACLI_MEDIA_ROOTS: policy.writes.fileRoots.join(path.delimiter) } : {};
+        await attempt('send_file', recipient, { file: a.path, text: a.caption });
         const res = await deps.runner.write<WacliSendResult>(argv, { env });
         await record({ ...base('send_file', recipient), outcome: 'sent', message_id: res.id, file: a.path, text: a.caption });
         return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
@@ -238,6 +253,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         release = hold();
         const argv = ['send', 'react', `--to=${recipient.jid}`, `--id=${a.message_id}`, `--reaction=${a.reaction}`];
         if (a.sender) argv.push(`--sender=${a.sender}`);
+        await attempt('react', recipient, { reaction: a.reaction, message_id: a.message_id });
         const res = await deps.runner.write<WacliSendResult>(argv);
         await record({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
         return ok({ sent: true, message_id: res.id, to: recipient });
@@ -268,6 +284,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const d = await gate(ctx, 'mark_read', recipient);
         if (d.kind === 'deny') return denied('mark_read', recipient, d, {});
         release = hold();
+        await attempt('mark_read', recipient, {});
         await deps.runner.write<WacliChatStateResult>(['chats', 'mark-read', `--chat=${recipient.jid}`], { idempotent: true });
         await record({ ...base('mark_read', recipient), outcome: 'sent' });
         return ok({ ok: true, chat: recipient });
