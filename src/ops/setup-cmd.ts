@@ -17,12 +17,18 @@ export function realIo(input: NodeJS.ReadableStream & { isTTY?: boolean } = proc
       }
       const rl = readline.createInterface({ input, output });
       try {
-        const closed = new Promise<boolean>((resolve) => { rl.once('close', () => resolve(false)); });
-        const answered = rl.question(`${question} [y/N] `).then((reply) => {
-          const answer = reply.trim().toLowerCase();
-          return answer === 'y' || answer === 'yes';
+        return await new Promise<boolean>((resolve, reject) => {
+          // Ctrl+C cancels setup. Reject before closing: closing fires 'close', which resolves false, and the first settle wins.
+          rl.once('SIGINT', () => {
+            reject(new Error('Setup cancelled.'));
+            rl.close();
+          });
+          rl.once('close', () => resolve(false));
+          rl.question(`${question} [y/N] `).then((reply) => {
+            const answer = reply.trim().toLowerCase();
+            resolve(answer === 'y' || answer === 'yes');
+          }, reject);
         });
-        return await Promise.race([answered, closed]);
       } finally {
         rl.close();
       }

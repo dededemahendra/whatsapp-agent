@@ -399,6 +399,16 @@ describe('realIo', () => {
     expect(await pending).toBe(false);
   });
 
+  it('cancels setup on Ctrl+C at a prompt instead of answering no', async () => {
+    const input = Object.assign(new PassThrough(), { isTTY: true });
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80 });
+    output.resume();
+    const pending = realIo(input, output).ask('Q');
+    const cancelled = expect(pending).rejects.toThrow('Setup cancelled');
+    input.write('\x03');
+    await cancelled;
+  });
+
   it('prints to the injected output with a trailing newline', async () => {
     const s = sink();
     realIo(new PassThrough(), s.out).print('hello');
