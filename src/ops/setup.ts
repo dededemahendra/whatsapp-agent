@@ -3,7 +3,7 @@ import { AgentError } from '../errors.js';
 import { ensureDirs, type Paths } from '../paths.js';
 import { DEFAULT_POLICY, loadPolicy, savePolicy, type Policy } from '../policy/schema.js';
 import type { Runner } from '../wacli/runner.js';
-import type { WacliAuthStatus } from '../wacli/shape.js';
+import { getStatus } from '../wacli/status.js';
 import { meetsMinimum, MIN_WACLI_VERSION } from '../version.js';
 import { mcpConfigHelp } from './mcp-config.js';
 import type { ServiceManager } from './service-types.js';
@@ -48,21 +48,22 @@ async function findWacli(o: SetupOptions): Promise<string | null> {
   return o.io.which(bin);
 }
 
-type Paired = { paired: true } | { paired: false; fatal: boolean };
+/** `revoked` says WhatsApp ended the linked session, which has to be cleared before a new device can be linked. */
+type Paired = { paired: true } | { paired: false; fatal: boolean; revoked: boolean };
 
 async function checkPaired(runner: Runner, io: SetupIO): Promise<Paired> {
   try {
-    const status = await runner.read<WacliAuthStatus>(['auth', 'status']);
-    return status.authenticated ? { paired: true } : { paired: false, fatal: false };
+    const status = await getStatus(runner, new Date());
+    return status.authenticated ? { paired: true } : { paired: false, fatal: false, revoked: status.session_revoked };
   } catch (e) {
     if (e instanceof AgentError) {
-      if (e.code === 'not_authenticated' || e.code === 'session_logged_out') return { paired: false, fatal: false };
+      if (e.code === 'not_authenticated' || e.code === 'session_logged_out') return { paired: false, fatal: false, revoked: e.code === 'session_logged_out' };
       io.print(e.message);
       const fatal = e.code === 'store_locked' || e.code === 'timeout' || e.code === 'wacli_not_installed';
-      return { paired: false, fatal };
+      return { paired: false, fatal, revoked: false };
     }
     io.print(String(e));
-    return { paired: false, fatal: false };
+    return { paired: false, fatal: false, revoked: false };
   }
 }
 
@@ -124,8 +125,14 @@ export async function runSetup(o: SetupOptions): Promise<boolean> {
   const first = await checkPaired(runner, io);
   if (!first.paired) {
     if (first.fatal) return false;
+    const accountArgs = policy.account ? ['--account', policy.account] : [];
+    if (first.revoked) {
+      // wacli keeps the revoked session on disk and would show no new code until it is cleared. Whether logout works does not matter: auth is next either way.
+      io.print('Clearing the revoked session first.');
+      await io.run(bin, [...accountArgs, 'auth', 'logout']);
+    }
     io.print('WhatsApp is not paired on this machine. On your phone open WhatsApp, Settings, Linked devices, Link a device, then scan the code that appears below. The first sync runs after pairing and can take a few minutes.');
-    await io.run(bin, [...(policy.account ? ['--account', policy.account] : []), 'auth']);
+    await io.run(bin, [...accountArgs, 'auth']);
     if (!(await checkPaired(runner, io)).paired) {
       io.print('Pairing did not complete. Run whatsapp-agent setup again when you are ready.');
       return false;

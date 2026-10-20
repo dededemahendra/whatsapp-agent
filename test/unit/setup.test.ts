@@ -8,7 +8,7 @@ import { BAN_NOTICE, runSetup, type SetupIO } from '../../src/ops/setup.js';
 import { resolvePaths } from '../../src/paths.js';
 import { DEFAULT_POLICY, loadPolicy, savePolicy } from '../../src/policy/schema.js';
 import { createRunner, type Runner } from '../../src/wacli/runner.js';
-import { FAKE_WACLI, fakeEnv, fixturesWith, makeTmp, readArgvLog, removeTmp } from '../helpers/fake.js';
+import { FAKE_WACLI, FIXTURES, fakeEnv, fixturesWith, makeTmp, readArgvLog, removeTmp } from '../helpers/fake.js';
 
 let tmp: string;
 beforeEach(async () => { tmp = await makeTmp(); });
@@ -49,18 +49,27 @@ function spy(o: ReturnType<typeof opts>, runner?: Runner) {
   return { made, makeRunner };
 }
 
-/** A wacli whose pairing state the test controls. `reads` records every read the setup makes. */
-function stubWacli(paired = false) {
-  const state = { paired };
+/** A wacli whose pairing state the test controls (doctor is what setup reads). `reads` records every read the setup makes. */
+function stubWacli(paired = false, revoked = false) {
+  const state = { paired, revoked };
   const reads: string[][] = [];
   const runner: Runner = {
     bin: 'stub-wacli',
-    read: async <T>(args: string[]): Promise<T> => { reads.push(args); return { authenticated: state.paired } as unknown as T; },
+    read: async <T>(args: string[]): Promise<T> => { reads.push(args); return { authenticated: state.paired, session_revoked: state.revoked } as unknown as T; },
     write: async () => { throw new Error('setup must not write through wacli'); },
     version: async () => '0.22.0',
   };
-  const pairOnAuth = (_cmd: string, args: string[]): number => { if (args.includes('auth')) state.paired = true; return 0; };
+  const pairOnAuth = (_cmd: string, args: string[]): number => {
+    if (args.includes('auth') && !args.includes('logout')) { state.paired = true; state.revoked = false; }
+    return 0;
+  };
   return { runner, state, reads, pairOnAuth };
+}
+
+/** A fixtures directory whose doctor.json reports the given pairing state. The caller removes it. */
+async function pairingFixtures(state: { authenticated: boolean; session_revoked: boolean }): Promise<string> {
+  const stock = JSON.parse(await readFile(path.join(FIXTURES, 'doctor.json'), 'utf8')) as { data: Record<string, unknown> };
+  return fixturesWith({ 'doctor.json': JSON.stringify({ ...stock, data: { ...stock.data, ...state } }) });
 }
 
 const service = (calls: string[]) => ({
@@ -105,7 +114,7 @@ describe('runSetup', () => {
 
   it('runs wacli auth when not paired and reports when pairing did not complete', async () => {
     const t = io({ answers: [false] });
-    const dir = await fixturesWith({ 'auth_status.json': '{"success":true,"data":{"authenticated":false},"error":null}\n' });
+    const dir = await pairingFixtures({ authenticated: false, session_revoked: false });
     try {
       const ok = await runSetup({ io: t.io, ...opts({ FAKE_WACLI_FIXTURES: dir }), service: null, isGlobal: true, flags: {} });
       expect(t.runs).toEqual([[FAKE_WACLI, 'auth']]);
@@ -179,13 +188,13 @@ describe('runSetup policy handling', () => {
     expect(await readFile(o.paths.policyFile, 'utf8')).toBe('{"nope":1}');
   });
 
-  it('reads auth status for the account named in the policy', async () => {
+  it('reads the pairing state for the account named in the policy', async () => {
     const log = path.join(tmp, 'argv.log');
     const o = opts({ FAKE_WACLI_LOG: log });
     await savePolicy(o.paths.policyFile, { ...DEFAULT_POLICY, account: 'work' });
     const t = io({});
     expect(await runSetup({ io: t.io, ...o, service: null, isGlobal: true, flags: {} })).toBe(true);
-    const status = (await readArgvLog(log)).find((r) => r.key === 'auth status');
+    const status = (await readArgvLog(log)).find((r) => r.key === 'doctor');
     expect(status).toBeDefined();
     expect(status!.argv).toContain('--account');
     expect(status!.argv[status!.argv.indexOf('--account') + 1]).toBe('work');
@@ -212,7 +221,7 @@ describe('runSetup pairing', () => {
     expect(await runSetup({ io: t.io, ...o, makeRunner: s.makeRunner, service: null, isGlobal: true, flags: {} })).toBe(true);
     expect(s.made).toEqual([{ bin: FAKE_WACLI, account: undefined }]);
     expect(t.runs).toEqual([[FAKE_WACLI, 'auth']]);
-    expect(w.reads).toEqual([['auth', 'status'], ['auth', 'status']]);
+    expect(w.reads).toEqual([['doctor'], ['doctor']]);
     const text = t.out.join('\n');
     expect(text).toContain('Link a device');
     expect(text).toContain('WhatsApp is paired.');
@@ -230,7 +239,7 @@ describe('runSetup pairing', () => {
   });
 
   it('stops without starting a pairing when the store is locked', async () => {
-    const o = opts({ FAKE_WACLI_FAIL: 'auth status|1|store is locked by another process' });
+    const o = opts({ FAKE_WACLI_FAIL: 'doctor|1|store is locked by another process' });
     const t = io({});
     expect(await runSetup({ io: t.io, ...o, service: null, isGlobal: true, flags: {} })).toBe(false);
     expect(t.out.join('\n')).toContain('The wacli store is locked by another process');
@@ -238,14 +247,63 @@ describe('runSetup pairing', () => {
     expect(await fileExists(o.paths.policyFile)).toBe(false);
   });
 
-  it('prints an unclassified auth status error and still offers the pairing', async () => {
+  it('prints an unclassified pairing check error and still offers the pairing', async () => {
     const t = io({});
-    const ok = await runSetup({ io: t.io, ...opts({ FAKE_WACLI_FAIL: 'auth status|1|something odd' }), service: null, isGlobal: true, flags: {} });
+    const ok = await runSetup({ io: t.io, ...opts({ FAKE_WACLI_FAIL: 'doctor|1|something odd' }), service: null, isGlobal: true, flags: {} });
     const text = t.out.join('\n');
     expect(text).toContain('something odd');
     expect(t.runs).toEqual([[FAKE_WACLI, 'auth']]);
     expect(ok).toBe(false);
     expect(text).toContain('Pairing did not complete');
+  });
+});
+
+describe('runSetup after a revoked session', () => {
+  it('clears the revoked session with auth logout, then hands over to auth', async () => {
+    const dir = await pairingFixtures({ authenticated: false, session_revoked: true });
+    try {
+      const t = io({});
+      const ok = await runSetup({ io: t.io, ...opts({ FAKE_WACLI_FIXTURES: dir }), service: null, isGlobal: true, flags: {} });
+      expect(t.runs).toEqual([[FAKE_WACLI, 'auth', 'logout'], [FAKE_WACLI, 'auth']]);
+      const text = t.out.join('\n');
+      expect(text).toContain('Clearing the revoked session first.');
+      expect(text.indexOf('Clearing the revoked session first.')).toBeLessThan(text.indexOf('Link a device'));
+      expect(ok).toBe(false); // the stock fixture stays revoked, so the check after the handoff still fails
+      expect(text).toContain('Pairing did not complete');
+    } finally {
+      await removeTmp(dir);
+    }
+  });
+
+  it('runs only auth for a store that was never paired', async () => {
+    const dir = await pairingFixtures({ authenticated: false, session_revoked: false });
+    try {
+      const t = io({});
+      await runSetup({ io: t.io, ...opts({ FAKE_WACLI_FIXTURES: dir }), service: null, isGlobal: true, flags: {} });
+      expect(t.runs).toEqual([[FAKE_WACLI, 'auth']]);
+      expect(t.out.join('\n')).not.toContain('Clearing the revoked session');
+    } finally {
+      await removeTmp(dir);
+    }
+  });
+
+  it('treats a doctor failure that says the session was revoked the same way, and keeps the account on both commands', async () => {
+    const o = opts({ FAKE_WACLI_FAIL: 'doctor|1|WhatsApp session was revoked: 401' });
+    await savePolicy(o.paths.policyFile, { ...DEFAULT_POLICY, account: 'work' });
+    const t = io({});
+    await runSetup({ io: t.io, ...o, service: null, isGlobal: true, flags: {} });
+    expect(t.runs).toEqual([[FAKE_WACLI, '--account', 'work', 'auth', 'logout'], [FAKE_WACLI, '--account', 'work', 'auth']]);
+  });
+
+  it('goes on to auth whatever auth logout exits with, clears once, and carries on when pairing works', async () => {
+    const o = opts();
+    const w = stubWacli(false, true);
+    const s = spy(o, w.runner);
+    const t = io({ onRun: (cmd, args) => { w.pairOnAuth(cmd, args); return args.includes('logout') ? 1 : 0; } });
+    expect(await runSetup({ io: t.io, ...o, makeRunner: s.makeRunner, service: null, isGlobal: true, flags: {} })).toBe(true);
+    expect(t.runs).toEqual([[FAKE_WACLI, 'auth', 'logout'], [FAKE_WACLI, 'auth']]);
+    expect(t.out.filter((l) => l.includes('Clearing the revoked session first.'))).toHaveLength(1);
+    expect(t.out.join('\n')).toContain('WhatsApp is paired.');
   });
 });
 
@@ -257,7 +315,7 @@ describe('runSetup pairing check outcomes', () => {
 
   it('treats not authenticated as unpaired and silent, then goes on to the pairing handoff', async () => {
     const t = io({});
-    const ok = await runSetup({ io: t.io, ...opts({ FAKE_WACLI_FAIL: 'auth status|1|not authenticated; run `wacli auth`' }), service: null, isGlobal: true, flags: {} });
+    const ok = await runSetup({ io: t.io, ...opts({ FAKE_WACLI_FAIL: 'doctor|1|not authenticated; run `wacli auth`' }), service: null, isGlobal: true, flags: {} });
     const text = t.out.join('\n');
     expect(t.runs).toEqual([[FAKE_WACLI, 'auth']]);
     expect(text).toContain('Link a device');
@@ -267,7 +325,7 @@ describe('runSetup pairing check outcomes', () => {
   });
 
   it('treats a timeout as fatal: it prints the reason and starts no pairing', async () => {
-    const o = opts({ FAKE_WACLI_FAIL: 'auth status|1|context deadline exceeded' });
+    const o = opts({ FAKE_WACLI_FAIL: 'doctor|1|context deadline exceeded' });
     const t = io({});
     expect(await runSetup({ io: t.io, ...o, service: null, isGlobal: true, flags: {} })).toBe(false);
     expect(t.out.join('\n')).toContain('wacli reported a timeout: context deadline exceeded');

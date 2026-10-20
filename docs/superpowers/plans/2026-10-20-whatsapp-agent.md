@@ -6365,6 +6365,7 @@ Then in Claude Code:
 6. Send twice within five seconds. Expect `rate_limited` with `retry_after_seconds`.
 7. `whatsapp-agent audit` shows the sent, declined and rate-limited attempts.
 8. `whatsapp-agent daemon status` shows running; `whatsapp-agent daemon logs` shows `event=connected`.
+9. Remove the linked device from the phone, run `whatsapp-agent setup` again, and confirm it clears the old session and shows a new QR code.
 
 Record any failure as an issue, fix it in a new task, and repeat the failing step.
 
