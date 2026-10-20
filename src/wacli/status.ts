@@ -41,6 +41,13 @@ export async function readHeartbeat(file: string): Promise<Date | null> {
 
 export async function getStatus(runner: Runner, now: Date): Promise<StatusInfo> {
   const version = await cachedVersion(runner);
+  if (version !== null && !meetsMinimum(version)) {
+    // An old wacli rejects the flags we send, so doctor would fail; report the version and nothing else.
+    return {
+      wacli_version: version, min_version_ok: false, authenticated: false, phone: null, connection_state: null, session_revoked: false,
+      store_dir: null, last_sync_at: null, heartbeat_at: null, heartbeat_age_seconds: null, counts: { chats: null, messages: null },
+    };
+  }
   let doctor: WacliDoctor | null = null;
   let doctorError: AgentError | null = null;
   try {

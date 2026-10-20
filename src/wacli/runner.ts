@@ -1,12 +1,13 @@
 import { execFile as execFileCb, type ExecFileException } from 'node:child_process';
 import { AgentError } from '../errors.js';
 import { debug } from '../log.js';
-import { parseVersion } from '../version.js';
+import { MIN_WACLI_VERSION, parseVersion } from '../version.js';
 
 export const READ_TIMEOUT_MS = 30_000;
 export const WRITE_TIMEOUT_MS = 90_000;
 export const MEDIA_TIMEOUT_MS = 120_000;
 export const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MATCH_CAP = 4096;
 export const SEND_UNCERTAIN = 'The outcome is uncertain: read the chat before retrying, because the message may have gone through.';
 
 export interface RunOptions {
@@ -77,8 +78,16 @@ function lastNonEmptyLine(s: string): string {
   return (lines[lines.length - 1] ?? '').trim();
 }
 
-export function classifyMessage(message: string, stderr = ''): AgentError {
-  const m = message.toLowerCase();
+function tooOld(stderr: string): AgentError {
+  return new AgentError('wacli_too_old', `wacli is older than the minimum ${MIN_WACLI_VERSION}. Upgrade with: brew upgrade wacli`, stderr ? { stderr_tail: tail(stderr) } : {});
+}
+
+/** Maps wacli's wording to an error code. `text` is what the keywords are matched against; `message` is what the agent reads when nothing matches. */
+function classify(message: string, text: string, stderr: string): AgentError {
+  const m = text.slice(0, MATCH_CAP).toLowerCase();
+  if (m.includes('unknown flag: --read-only') || m.includes('unknown flag: --account') || m.includes('unknown flag: --timeout')) {
+    return tooOld(stderr);
+  }
   if (m.includes('not authenticated')) {
     return new AgentError('not_authenticated', 'WhatsApp is not paired on this machine. Run `whatsapp-agent setup` and scan the QR code.');
   }
@@ -97,30 +106,39 @@ export function classifyMessage(message: string, stderr = ''): AgentError {
   return new AgentError('wacli_error', message, stderr ? { stderr_tail: tail(stderr) } : {});
 }
 
-export function parseEnvelope<T>(stdout: string, stderr: string): T {
-  let env: Envelope;
-  try {
-    env = JSON.parse(stdout.trim()) as Envelope;
-  } catch {
+export function classifyMessage(message: string, stderr = ''): AgentError {
+  return classify(message, message, stderr);
+}
+
+/** The first JSON object in a stream: the whole text first, then each non-empty line from the last backwards. */
+function findEnvelope(text: string): Partial<Envelope> | null {
+  const t = text.trim();
+  if (t === '') return null;
+  const attempts = [t, ...t.split('\n').map((l) => l.trim()).filter((l) => l !== '').reverse()];
+  for (const attempt of attempts) {
     try {
-      env = JSON.parse(lastNonEmptyLine(stdout)) as Envelope;
+      const v: unknown = JSON.parse(attempt);
+      if (typeof v === 'object' && v !== null && !Array.isArray(v)) return v as Partial<Envelope>;
     } catch {
-      throw new AgentError('wacli_error', 'wacli returned output that is not JSON', { stderr_tail: tail(stderr) });
+      // not JSON; try the next line
     }
   }
+  return null;
+}
+
+export function parseEnvelope<T>(stdout: string, stderr: string): T {
+  const env = findEnvelope(stdout);
+  if (!env) throw new AgentError('wacli_error', 'wacli returned output that is not JSON', { stderr_tail: tail(stderr) });
   if (!env.success) throw classifyMessage(env.error ?? 'wacli reported failure', stderr);
   return env.data as T;
 }
 
+/** A failed run: wacli's JSON error envelope on stderr (or stdout) when there is one, else the keywords in the whole stderr text. */
 export function classifyFailure(code: number, stdout: string, stderr: string): AgentError {
-  const line = lastNonEmptyLine(stderr) || lastNonEmptyLine(stdout);
-  try {
-    const env = JSON.parse(line) as Partial<Envelope>;
-    if (env && env.success === false && typeof env.error === 'string') return classifyMessage(env.error, stderr);
-  } catch {
-    // not JSON; fall through
-  }
-  return classifyMessage(line || `wacli exited with code ${code}`, stderr);
+  const text = stderr.trim() !== '' ? stderr : stdout;
+  const env = findEnvelope(text);
+  if (env && env.success === false && typeof env.error === 'string') return classifyMessage(env.error, stderr);
+  return classify(lastNonEmptyLine(text) || `wacli exited with code ${code}`, text, stderr);
 }
 
 function markUncertain(err: AgentError): AgentError {

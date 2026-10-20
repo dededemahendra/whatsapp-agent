@@ -33,3 +33,15 @@ describe('doctor', () => {
     expect(r.problems[0]).toContain('wacli was not found');
   });
 });
+
+describe('doctor with a wacli older than the minimum', () => {
+  it('names the old version first and does not call the store unpaired', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_VERSION: '0.21.0', FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+    const r = await collectDoctor({ runner, policy: DEFAULT_POLICY, paths, service: null, now: () => new Date('2026-10-20T10:00:00Z') });
+    expect(r.status).toMatchObject({ wacli_version: '0.21.0', min_version_ok: false, authenticated: false });
+    expect(r.problems[0]).toBe('wacli 0.21.0 is older than the minimum 0.22.0. Fix: brew upgrade wacli');
+    expect(r.problems.some((p) => p.includes('not paired'))).toBe(false);
+    expect(formatDoctor(r)).toContain('below minimum');
+  });
+});

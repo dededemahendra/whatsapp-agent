@@ -138,3 +138,60 @@ describe('pure helpers', () => {
     expect(classifyMessage('timed out waiting for store lock after 5s').code).toBe('store_locked');
   });
 });
+
+describe('a wacli older than the minimum', () => {
+  const TOO_OLD = 'wacli is older than the minimum 0.22.0. Upgrade with: brew upgrade wacli';
+  const USAGE = 'Error: unknown flag: --read-only\nUsage:\n  wacli <cmd> [flags]\n';
+
+  it('maps the unknown flag errors of an old wacli to wacli_too_old and keeps the stderr tail', () => {
+    for (const flag of ['--read-only', '--account', '--timeout']) {
+      const e = classifyMessage(`unknown flag: ${flag}`);
+      expect(e.code).toBe('wacli_too_old');
+      expect(e.message).toBe(TOO_OLD);
+    }
+    expect(classifyMessage('unknown flag: --read-only', USAGE).details).toEqual({ stderr_tail: USAGE });
+  });
+
+  it('finds the unknown flag in a plain stderr text whose last line is usage help', () => {
+    expect(classifyFailure(1, '', USAGE)).toMatchObject({ code: 'wacli_too_old', message: TOO_OLD, details: { stderr_tail: USAGE } });
+  });
+
+  it('flags an old wacli end to end through the fake, and does not call a rejected write uncertain', async () => {
+    const old = { FAKE_WACLI_VERSION: '0.21.0' };
+    await expect(runner(old).read(['doctor'])).rejects.toMatchObject({
+      code: 'wacli_too_old',
+      message: TOO_OLD,
+      details: { stderr_tail: expect.stringContaining('unknown flag: --read-only') },
+    });
+    const err = await runner(old, 'work').write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi']).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'wacli_too_old', details: { stderr_tail: expect.stringContaining('unknown flag: --account') } });
+    expect((err as AgentError).details.outcome_uncertain).toBeUndefined();
+    expect((err as AgentError).message).toBe(TOO_OLD);
+  });
+
+  it('still reads and writes when the fake is at the minimum or newer', async () => {
+    await expect(runner({ FAKE_WACLI_VERSION: '0.22.0' }).read(['doctor'])).resolves.toBeDefined();
+    await expect(runner({ FAKE_WACLI_VERSION: '0.23.1' }, 'work').read(['doctor'])).resolves.toBeDefined();
+  });
+});
+
+describe('classification looks at the whole text', () => {
+  it('matches a keyword on any line of the stderr text, not only the last', () => {
+    expect(classifyFailure(1, '', 'store is locked by another process\nexit status 1\n').code).toBe('store_locked');
+  });
+
+  it('finds the failure envelope when it is not the last stderr line', () => {
+    const stderr = '{"success":false,"data":null,"error":"not authenticated; run `wacli auth`"}\nUsage: wacli auth\n';
+    expect(classifyFailure(1, '', stderr).code).toBe('not_authenticated');
+  });
+
+  it('finds the failure envelope when noise follows it on stderr', () => {
+    const stderr = 'warning: repeated send within 5 seconds\n{"success":false,"data":null,"error":"chat not found"}\nexit status 1\n';
+    expect(classifyFailure(1, '', stderr).code).toBe('not_found');
+  });
+
+  it('parseEnvelope finds the envelope on any line, from the last backwards', () => {
+    expect(parseEnvelope('log line\n{"success":true,"data":{"a":1},"error":null}\ntrailing log\n', '')).toEqual({ a: 1 });
+    expect(() => parseEnvelope('log line\n{"success":false,"data":null,"error":"chat not found"}\ntrailing log\n', '')).toThrowError(expect.objectContaining({ code: 'not_found' }));
+  });
+});

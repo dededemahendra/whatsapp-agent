@@ -40,7 +40,8 @@ describe('whatsapp_status', () => {
   it('flags an old wacli', async () => {
     h = await makeHarness({ env: { FAKE_WACLI_VERSION: '0.21.0' } });
     const r = await h.call('whatsapp_status');
-    expect(r.structuredContent).toMatchObject({ wacli_version: '0.21.0', min_version_ok: false });
+    expect(r.structuredContent).toMatchObject({ wacli_version: '0.21.0', min_version_ok: false, authenticated: false, phone: null, store_dir: null });
+    expect((await h.argv()).map((x) => x.key)).toEqual(['version']);
   });
 
   it('reads the wacli version once per process but retries while it is unknown', async () => {

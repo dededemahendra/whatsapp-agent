@@ -30,9 +30,9 @@ export async function collectDoctor(opts: { runner: Runner; policy: Policy; path
     };
   }
   if (status.wacli_version !== null && !status.min_version_ok) {
-    problems.push(`wacli ${status.wacli_version} is older than the minimum ${MIN_WACLI_VERSION}. Upgrade with: brew upgrade wacli`);
+    problems.push(`wacli ${status.wacli_version} is older than the minimum ${MIN_WACLI_VERSION}. Fix: brew upgrade wacli`);
   }
-  if (status.wacli_version !== null && !status.authenticated) {
+  if (status.wacli_version !== null && status.min_version_ok && !status.authenticated) {
     problems.push('WhatsApp is not paired. Run: whatsapp-agent setup');
   }
   if (status.session_revoked) {

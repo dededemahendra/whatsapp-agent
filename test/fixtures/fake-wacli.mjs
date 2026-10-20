@@ -54,6 +54,23 @@ function fail(code, message) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// An old wacli does not know --read-only or --account and fails like cobra does, in plain text.
+const MIN_VERSION = [0, 22, 0];
+function belowMinimum(v) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(v);
+  if (!m) return false;
+  const parts = m.slice(1).map(Number);
+  for (let i = 0; i < 3; i++) if (parts[i] !== MIN_VERSION[i]) return parts[i] < MIN_VERSION[i];
+  return false;
+}
+if (belowMinimum(process.env.FAKE_WACLI_VERSION || '')) {
+  const bad = argv.find((a) => a === '--read-only' || a === '--account' || a.startsWith('--account='));
+  if (bad) {
+    process.stderr.write(`Error: unknown flag: ${bad.split('=')[0]}\nUsage:\n  wacli <cmd> [flags]\n`);
+    process.exit(1);
+  }
+}
+
 const sleepMs = Number(process.env.FAKE_WACLI_SLEEP_MS || 0);
 if (sleepMs > 0) await sleep(sleepMs);
 
