@@ -656,3 +656,13 @@ overrides the earlier text where they differ.
   v1.
 - A14. The daemon service installer accepts `WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE=1`
   to allow installing from a repository checkout during development.
+- A15. Name resolution: a single exact case-insensitive match wins; a lone
+  partial match wins only when the chat or contact name contains the input;
+  otherwise resolution falls through to contacts and then `not_found`, so a
+  digit fragment can never land on a JID substring match.
+- A16. User JIDs are canonicalised (a leading `+` and a `:device` suffix are
+  stripped). A phone-like input needs an optional single leading `+` and 6 to
+  15 digits; digits starting with 0 are refused as `invalid_input` with a
+  request for the international format, instead of building a JID.
+- A17. wacli encodes an empty list as `null`. Every list read goes through
+  `asList`, which treats anything that is not an array as empty.

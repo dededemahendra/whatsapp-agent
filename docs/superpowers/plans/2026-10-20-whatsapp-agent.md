@@ -1635,7 +1635,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - `interface Resolved { jid: string; name: string | null; kind: ChatKind }`
   - `interface Resolver { resolve(input: string): Promise<Resolved> }`
   - `createResolver(runner: Runner): Resolver`
-  - `JID_RE`, `looksLikePhone(s): boolean`, `digitsOf(s): string`, `pickUnique(candidates: Resolved[], input: string): { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Resolved[] }`
+  - `JID_RE`, `looksLikePhone(s): boolean` (optional single leading `+`, 6 to 15 digits), `digitsOf(s): string`, `canonicalJid(jid): string` (strips a leading `+` and a `:device` suffix from user JIDs), `pickUnique(candidates: Resolved[], input: string): PickResult` where `PickResult = { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Resolved[] }`; a lone partial match wins only when the name contains the input
+  - Task 6 also appends `asList<T>(v: T[] | null | undefined): T[]` to `src/wacli/shape.ts` (wacli encodes an empty list as `null`); every later list read uses it
 - Errors: `ambiguous_recipient` with `details.candidates: Resolved[]` (at most 10), `not_found`, `invalid_input` for an empty string.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1645,7 +1646,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```ts
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createResolver, looksLikePhone, pickUnique } from '../../src/wacli/resolve.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { canonicalJid, createResolver, looksLikePhone, pickUnique } from '../../src/wacli/resolve.js';
 import { createRunner } from '../../src/wacli/runner.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, readArgvLog, removeTmp } from '../helpers/fake.js';
 
@@ -1664,6 +1666,16 @@ describe('looksLikePhone', () => {
     expect(looksLikePhone('(04) 0000-0001')).toBe(true);
     expect(looksLikePhone('Alice')).toBe(false);
     expect(looksLikePhone('12345')).toBe(false);
+    expect(looksLikePhone('61+400+000+001')).toBe(false);
+    expect(looksLikePhone('1234567890123456')).toBe(false);
+  });
+});
+
+describe('canonicalJid', () => {
+  it('strips a leading plus and a device suffix from user JIDs only', () => {
+    expect(canonicalJid('61400000001:12@s.whatsapp.net')).toBe('61400000001@s.whatsapp.net');
+    expect(canonicalJid('+61400000001@s.whatsapp.net')).toBe('61400000001@s.whatsapp.net');
+    expect(canonicalJid('120363000000000001@g.us')).toBe('120363000000000001@g.us');
   });
 });
 
@@ -1681,6 +1693,9 @@ describe('pickUnique', () => {
   });
   it('reports none', () => {
     expect(pickUnique([], 'x')).toEqual({ kind: 'none' });
+  });
+  it('rejects a single partial match whose name does not contain the input', () => {
+    expect(pickUnique([a], 'zzz')).toEqual({ kind: 'none' });
   });
 });
 
@@ -1730,6 +1745,35 @@ describe('createResolver', () => {
   it('rejects empty input', async () => {
     await expect(resolver().resolve('   ')).rejects.toMatchObject({ code: 'invalid_input' });
   });
+
+  it('canonicalises a device-suffixed JID before looking it up', async () => {
+    const r = await resolver().resolve('61400000001:12@s.whatsapp.net');
+    expect(r).toEqual({ jid: '61400000001@s.whatsapp.net', name: 'Alice', kind: 'user' });
+  });
+
+  it('rejects a national-format number instead of building a JID', async () => {
+    await expect(resolver().resolve('0400 000 001')).rejects.toMatchObject({ code: 'invalid_input' });
+    const recs = await readArgvLog(log);
+    expect(recs).toHaveLength(0);
+  });
+
+  it('treats a null list from wacli as empty', async () => {
+    const dir = path.join(tmp, 'fixtures');
+    await mkdir(dir);
+    for (const name of ['chats_list', 'contacts_search']) {
+      await writeFile(path.join(dir, `${name}.json`), '{"success":true,"data":null,"error":null}\n');
+    }
+    await expect(resolver({ FAKE_WACLI_FIXTURES: dir }).resolve('Nobody')).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('accepts a lone chat only when its name contains the input', async () => {
+    const dir = path.join(tmp, 'fixtures');
+    await mkdir(dir);
+    await writeFile(path.join(dir, 'chats_list.json'), '{"success":true,"data":[{"jid":"120363000000000001@g.us","kind":"group","name":"Family","last_message_ts":"2026-10-19T09:00:00Z","archived":false,"pinned":false,"muted_until":0,"unread":false,"unread_count":0}],"error":null}\n');
+    const r = resolver({ FAKE_WACLI_FIXTURES: dir, FAKE_WACLI_EMPTY: 'contacts search' });
+    expect(await r.resolve('fam')).toEqual({ jid: '120363000000000001@g.us', name: 'Family', kind: 'group' });
+    await expect(r.resolve('zzz')).rejects.toMatchObject({ code: 'not_found' });
+  });
 });
 ```
 
@@ -1745,7 +1789,7 @@ Expected: FAIL, module not found.
 ```ts
 import { AgentError } from '../errors.js';
 import type { Runner } from './runner.js';
-import { kindFromJid, kindFromWacli, nonEmpty, type ChatKind, type WacliChat, type WacliContact, type WacliResolution } from './shape.js';
+import { asList, kindFromJid, kindFromWacli, nonEmpty, type ChatKind, type WacliChat, type WacliContact, type WacliResolution } from './shape.js';
 
 export interface Resolved { jid: string; name: string | null; kind: ChatKind }
 export interface Resolver { resolve(input: string): Promise<Resolved> }
@@ -1756,19 +1800,31 @@ export function digitsOf(s: string): string {
   return s.replace(/\D/g, '');
 }
 
+/** An optional single leading plus, then digits with spaces, dashes or parentheses, 6 to 15 digits in all. */
 export function looksLikePhone(s: string): boolean {
   const t = s.trim();
-  return /^[+\d\s()\-]+$/.test(t) && digitsOf(t).length >= 6;
+  const n = digitsOf(t).length;
+  return /^\+?[\d\s()\-]+$/.test(t) && n >= 6 && n <= 15;
 }
 
-export type Pick = { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Resolved[] };
+/** Strips a leading + and a :device suffix from user JIDs so one person has one spelling. */
+export function canonicalJid(jid: string): string {
+  if (!jid.endsWith('@s.whatsapp.net')) return jid;
+  const user = (jid.split('@')[0] ?? '').replace(/^\+/, '').split(':')[0] ?? '';
+  return `${user}@s.whatsapp.net`;
+}
 
-export function pickUnique(candidates: Resolved[], input: string): Pick {
+export type PickResult = { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Resolved[] };
+
+export function pickUnique(candidates: Resolved[], input: string): PickResult {
   if (candidates.length === 0) return { kind: 'none' };
   const needle = input.trim().toLowerCase();
-  const exact = candidates.filter((c) => (c.name ?? '').toLowerCase() === needle);
+  const exact = candidates.filter((c) => (c.name ?? '').trim().toLowerCase() === needle);
   if (exact.length === 1) return { kind: 'one', value: exact[0]! };
-  if (candidates.length === 1) return { kind: 'one', value: candidates[0]! };
+  if (candidates.length === 1) {
+    const only = candidates[0]!;
+    return (only.name ?? '').toLowerCase().includes(needle) ? { kind: 'one', value: only } : { kind: 'none' };
+  }
   return { kind: 'many', candidates: candidates.slice(0, 10) };
 }
 
@@ -1779,28 +1835,32 @@ function ambiguous(input: string, candidates: Resolved[]): AgentError {
 }
 
 export function createResolver(runner: Runner): Resolver {
-  async function byJid(jid: string): Promise<Resolved> {
-    const chats = await runner.read<WacliChat[]>(['chats', 'list', `--query=${jid}`, '--limit=5']);
+  async function byJid(input: string): Promise<Resolved> {
+    const jid = canonicalJid(input);
+    const chats = asList(await runner.read<WacliChat[] | null>(['chats', 'list', `--query=${jid}`, '--limit=5']));
     const hit = chats.find((c) => c.jid === jid);
     return { jid, name: hit ? nonEmpty(hit.name) : null, kind: hit ? kindFromWacli(hit.kind, jid) : kindFromJid(jid) };
   }
 
   async function byPhone(input: string): Promise<Resolved> {
     const digits = digitsOf(input);
-    const results = await runner.read<WacliResolution[]>(['contacts', 'resolve', '--', digits]);
+    if (digits.startsWith('0')) {
+      throw new AgentError('invalid_input', `"${input.trim()}" looks like a national number. Use the international format with the country code, for example +61 400 000 001.`);
+    }
+    const results = asList(await runner.read<WacliResolution[] | null>(['contacts', 'resolve', '--', digits]));
     const r = results[0];
-    if (r && r.resolved && r.jid) return { jid: r.jid, name: nonEmpty(r.name), kind: 'user' };
+    if (r && r.resolved && r.jid) return { jid: canonicalJid(r.jid), name: nonEmpty(r.name), kind: 'user' };
     return { jid: `${digits}@s.whatsapp.net`, name: null, kind: 'user' };
   }
 
   async function byName(input: string): Promise<Resolved> {
-    const chats = await runner.read<WacliChat[]>(['chats', 'list', `--query=${input}`, '--limit=10']);
+    const chats = asList(await runner.read<WacliChat[] | null>(['chats', 'list', `--query=${input}`, '--limit=10']));
     const fromChats = pickUnique(chats.map((c) => ({ jid: c.jid, name: nonEmpty(c.name), kind: kindFromWacli(c.kind, c.jid) })), input);
     if (fromChats.kind === 'one') return fromChats.value;
     if (fromChats.kind === 'many') throw ambiguous(input, fromChats.candidates);
 
-    const contacts = await runner.read<WacliContact[]>(['contacts', 'search', '--limit=10', '--', input]);
-    const fromContacts = pickUnique(contacts.map((c) => ({ jid: c.jid, name: nonEmpty(c.name) ?? nonEmpty(c.alias), kind: 'user' as const })), input);
+    const contacts = asList(await runner.read<WacliContact[] | null>(['contacts', 'search', '--limit=10', '--', input]));
+    const fromContacts = pickUnique(contacts.map((c) => ({ jid: canonicalJid(c.jid), name: nonEmpty(c.name) ?? nonEmpty(c.alias), kind: 'user' as const })), input);
     if (fromContacts.kind === 'one') return fromContacts.value;
     if (fromContacts.kind === 'many') throw ambiguous(input, fromContacts.candidates);
     throw new AgentError('not_found', `No chat or contact matches "${input}". Pass a phone number or JID.`);
@@ -1821,7 +1881,7 @@ export function createResolver(runner: Runner): Resolver {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/resolve.test.ts && pnpm typecheck`
-Expected: PASS (13 tests).
+Expected: PASS (19 tests). Also add `asList` and its test to `src/wacli/shape.ts` and `test/unit/shape.test.ts` (see Interfaces).
 
 - [ ] **Step 5: Commit**
 
