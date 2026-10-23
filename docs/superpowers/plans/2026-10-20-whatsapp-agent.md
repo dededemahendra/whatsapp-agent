@@ -6,14 +6,14 @@
 
 **Architecture:** A TypeScript Node package. The MCP server maps each tool to one `wacli` invocation spawned with `execFile` (never a shell), reads via `--read-only --json`, and gates writes through a pure policy engine that can return an MCP `input_required` confirmation. A separate `daemon` command supervises `wacli sync --follow`. Nothing touches wacli's SQLite files.
 
-**Tech Stack:** Node 22+, TypeScript 7 (`tsc` emit, ESM, NodeNext), `@modelcontextprotocol/server` 2.3 (MCP spec 2026-07-28, with legacy shim), `zod` 4, `commander` 15, `vitest` 5, pnpm 12. External runtime dependency: `wacli` 0.22.0 or newer (Go binary from Homebrew or `go install`).
+**Tech Stack:** Node 22.12+, TypeScript 7 (`tsc` emit, ESM, NodeNext), `@modelcontextprotocol/server` 2.3 (MCP spec 2026-07-28, with legacy shim), `zod` 4, `commander` 15, `vitest` 5, pnpm 12. External runtime dependency: `wacli` 0.22.0 or newer (Go binary from Homebrew or `go install`).
 
 **Spec:** `docs/superpowers/specs/2026-10-20-whatsapp-agent-design.md`
 
 ## Global Constraints
 
 - Package name `whatsapp-agent`, unscoped, MIT, version `0.1.0`; repo is public on GitHub account `dededemahendra`; commits are Conventional Commits.
-- Node engines `>=22`; CI matrix Node 22, 24, 26. (Spec said `>=20`; Node 20 reached end of life in April 2026. Recorded as amendment A1 in Task 1.)
+- Node engines `>=22.12.0` (the floor commander 15 and vitest 5 require); CI matrix Node 22, 24, 26. (Spec said `>=20`; Node 20 reached end of life in April 2026. Recorded as amendment A1 in Task 1.)
 - Build is plain `tsc` emit to `dist/`, no bundler; the published `bin` is `bin/whatsapp-agent.mjs`, a two-line shim that imports `../dist/cli.js`. (Amendment A2.)
 - Minimum wacli version `0.22.0`, read from the plain-text output of `wacli version` (it has no `--json`). (Amendment A3.)
 - Every wacli invocation: `execFile(bin, argv)` with an argv array. Any value that originates from the model is passed as `--flag=value` or after a `--` separator, never as a bare token that could be parsed as a flag.
@@ -57,8 +57,9 @@ Append to the end of `docs/superpowers/specs/2026-10-20-whatsapp-agent-design.md
 Facts learnt from the wacli and MCP SDK sources while writing the plan. Each
 overrides the earlier text where they differ.
 
-- A1. Node engines are `>=22` and CI runs Node 22, 24 and 26. Node 20 reached
-  end of life in April 2026.
+- A1. Node engines are `>=22.12.0` (the floor commander 15 and vitest 5
+  require) and CI runs Node 22, 24 and 26. Node 20 reached end of life in
+  April 2026.
 - A2. No bundler. `tsc` emits ESM to `dist/`; `bin/whatsapp-agent.mjs` is a
   shim that imports `dist/cli.js`. `tsdown` is dropped.
 - A3. `wacli version` prints plain text (for example `0.22.0`) and has no
@@ -114,7 +115,7 @@ overrides the earlier text where they differ.
   "type": "module",
   "bin": { "whatsapp-agent": "bin/whatsapp-agent.mjs" },
   "files": ["bin", "dist", "SKILL.md", "README.md", "CHANGELOG.md", "LICENSE"],
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.12.0" },
   "packageManager": "pnpm@12.9.1",
   "repository": { "type": "git", "url": "git+https://github.com/dededemahendra/whatsapp-agent.git" },
   "keywords": ["whatsapp", "mcp", "agent", "wacli", "cli"],
@@ -595,7 +596,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ### Task 3: Fake wacli executable and fixtures
 
 **Files:**
-- Create: `test/fixtures/fake-wacli.mjs` (executable), `test/fixtures/README.md`, `test/fixtures/responses/*.json` (17 files listed below), `test/helpers/fake.ts`, `test/unit/fake-wacli.test.ts`
+- Create: `test/fixtures/fake-wacli.mjs` (executable), `test/fixtures/README.md`, `test/fixtures/responses/*.json` (16 files listed below), `test/helpers/fake.ts`, `test/unit/fake-wacli.test.ts`
 
 **Interfaces:**
 - Produces: a stand-in `wacli` binary driven by environment variables, and test helpers `FAKE_WACLI`, `FIXTURES`, `fakeEnv(extra?)`, `makeTmp()`, `removeTmp(dir)`, `readArgvLog(file): Promise<ArgvRecord[]>` where `ArgvRecord = { argv: string[]; key: string; env: Record<string, string | undefined> }`.
@@ -703,7 +704,7 @@ if (process.env.FAKE_WACLI_FAIL) {
   if (failKey === key || failKey === '*') fail(Number(code || 1), message || 'fake failure');
 }
 if (process.env.FAKE_WACLI_BIG === '1') {
-  process.stdout.write('x'.repeat(20 * 1024 * 1024));
+  await new Promise((resolve) => process.stdout.write('x'.repeat(20 * 1024 * 1024), resolve));
   process.exit(0);
 }
 
@@ -910,11 +911,11 @@ export async function removeTmp(dir: string): Promise<void> {
 
 /** Environment for spawning the fake. Strips wacli variables the runner must set itself. */
 export function fakeEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, FAKE_WACLI_FIXTURES: FIXTURES, ...extra };
+  const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.WACLI_READONLY;
   delete env.WACLI_MEDIA_ROOTS;
   delete env.NO_COLOR;
-  return env;
+  return { ...env, FAKE_WACLI_FIXTURES: FIXTURES, ...extra };
 }
 
 export async function readArgvLog(file: string): Promise<ArgvRecord[]> {
@@ -974,7 +975,7 @@ describe('fake wacli', () => {
     const { stdout } = await run(FAKE_WACLI, ['--json', '--read-only', 'media', 'download', '--chat=61400000001@s.whatsapp.net', '--id=MSG3', `--output=${tmp}`], { env: fakeEnv() });
     const env = JSON.parse(stdout);
     expect(env.data.path).toBe(path.join(tmp, 'MSG3.png'));
-    expect(env.data.bytes).toBe(68);
+    expect(env.data.bytes).toBe(70);
   });
 });
 ```
@@ -1015,6 +1016,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 `test/unit/runner.test.ts`:
 
 ```ts
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AgentError } from '../../src/errors.js';
@@ -1050,6 +1052,39 @@ describe('createRunner against the fake wacli', () => {
     const [rec] = await readArgvLog(log);
     expect(rec!.argv).toEqual(['--json', '--timeout', '85s', 'send', 'text', '--to=x@s.whatsapp.net', '--message=hi']);
     expect(rec!.env.WACLI_READONLY).toBeUndefined();
+  });
+
+  it('isolates WACLI_READONLY per mode even when the parent env sets it', async () => {
+    const r = createRunner({ bin: FAKE_WACLI, baseEnv: { ...fakeEnv({ FAKE_WACLI_LOG: log }), WACLI_READONLY: '1' } });
+    await r.write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi']);
+    await r.read(['doctor'], { env: { WACLI_READONLY: '0' } });
+    const recs = await readArgvLog(log);
+    expect(recs[0]!.env.WACLI_READONLY).toBeUndefined();
+    expect(recs[1]!.env.WACLI_READONLY).toBe('1');
+  });
+
+  it('marks a failed write as outcome-uncertain and leaves reads alone', async () => {
+    const failing = runner({ FAKE_WACLI_FAIL: '*|1|connection reset by peer' });
+    await expect(failing.write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.stringContaining('may have gone through'),
+      details: expect.objectContaining({ outcome_uncertain: true }),
+    });
+    await expect(failing.read(['doctor'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.not.stringContaining('may have gone through'),
+    });
+  });
+
+  it('marks a write whose envelope reports failure as outcome-uncertain', async () => {
+    const dir = path.join(tmp, 'fixtures');
+    await mkdir(dir);
+    await writeFile(path.join(dir, 'send_text.json'), '{"success":false,"data":null,"error":"stale session"}\n');
+    await expect(runner({ FAKE_WACLI_FIXTURES: dir }).write(['send', 'text', '--to=x@s.whatsapp.net', '--message=hi'])).rejects.toMatchObject({
+      code: 'wacli_error',
+      message: expect.stringContaining('stale session. The outcome is uncertain'),
+      details: expect.objectContaining({ outcome_uncertain: true }),
+    });
   });
 
   it('prefixes --account when configured', async () => {
@@ -1101,6 +1136,10 @@ describe('pure helpers', () => {
     expect(() => parseEnvelope('{"success":false,"data":null,"error":"not authenticated; run `wacli auth`"}', '')).toThrowError(expect.objectContaining({ code: 'not_authenticated' }));
   });
 
+  it('parseEnvelope accepts a pretty-printed multi-line envelope', () => {
+    expect(parseEnvelope<number[]>('{\n  "success": true,\n  "data": [1, 2],\n  "error": null\n}\n', '')).toEqual([1, 2]);
+  });
+
   it('classifyFailure prefers the stderr envelope and falls back to the exit code', () => {
     expect(classifyFailure(1, '', '{"success":false,"data":null,"error":"store is locked (another wacli is running?)"}').code).toBe('store_locked');
     expect(classifyFailure(3, '', '').message).toBe('wacli exited with code 3');
@@ -1108,6 +1147,13 @@ describe('pure helpers', () => {
 
   it('classifyMessage maps not found', () => {
     expect(classifyMessage('message not found').code).toBe('not_found');
+  });
+
+  it('classifyMessage maps wacli deadline wording to timeout and keeps lock waits as store_locked', () => {
+    const e = classifyMessage('send text: context deadline exceeded');
+    expect(e.code).toBe('timeout');
+    expect(e.message).toContain('may have gone through');
+    expect(classifyMessage('timed out waiting for store lock after 5s').code).toBe('store_locked');
   });
 });
 ```
@@ -1131,6 +1177,7 @@ export const READ_TIMEOUT_MS = 30_000;
 export const WRITE_TIMEOUT_MS = 90_000;
 export const MEDIA_TIMEOUT_MS = 120_000;
 export const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+export const SEND_UNCERTAIN = 'The outcome is uncertain: read the chat before retrying, because the message may have gone through.';
 
 export interface RunOptions {
   timeoutMs?: number;
@@ -1211,6 +1258,9 @@ export function classifyMessage(message: string, stderr = ''): AgentError {
   if (m.includes('store is locked') || m.includes('waiting for store lock')) {
     return new AgentError('store_locked', 'The wacli store is locked by another process. Check `whatsapp-agent daemon status`.');
   }
+  if (m.includes('deadline exceeded') || m.includes('timed out') || m.includes('timeout')) {
+    return new AgentError('timeout', `wacli reported a timeout: ${message}. If this was a send, read the chat before retrying: the message may have gone through.`);
+  }
   if (m.includes('not found') || m.includes('no such') || m.includes('unknown chat')) {
     return new AgentError('not_found', message);
   }
@@ -1218,12 +1268,15 @@ export function classifyMessage(message: string, stderr = ''): AgentError {
 }
 
 export function parseEnvelope<T>(stdout: string, stderr: string): T {
-  const line = lastNonEmptyLine(stdout);
   let env: Envelope;
   try {
-    env = JSON.parse(line) as Envelope;
+    env = JSON.parse(stdout.trim()) as Envelope;
   } catch {
-    throw new AgentError('wacli_error', 'wacli returned output that is not JSON', { stderr_tail: tail(stderr) });
+    try {
+      env = JSON.parse(lastNonEmptyLine(stdout)) as Envelope;
+    } catch {
+      throw new AgentError('wacli_error', 'wacli returned output that is not JSON', { stderr_tail: tail(stderr) });
+    }
   }
   if (!env.success) throw classifyMessage(env.error ?? 'wacli reported failure', stderr);
   return env.data as T;
@@ -1240,6 +1293,13 @@ export function classifyFailure(code: number, stdout: string, stderr: string): A
   return classifyMessage(line || `wacli exited with code ${code}`, stderr);
 }
 
+function markUncertain(err: AgentError): AgentError {
+  if (err.code !== 'wacli_error' && err.code !== 'timeout') return err;
+  const base = err.message.replace(/[\s.]+$/, '');
+  const message = err.message.includes('may have gone through') ? err.message : `${base}. ${SEND_UNCERTAIN}`;
+  return new AgentError(err.code, message, { ...err.details, outcome_uncertain: true });
+}
+
 export function createRunner(cfg: RunnerConfig): Runner {
   const spawn = cfg.spawn ?? defaultSpawn;
   const prefix = cfg.account ? ['--account', cfg.account] : [];
@@ -1253,9 +1313,21 @@ export function createRunner(cfg: RunnerConfig): Runner {
     if (mode === 'read') env.WACLI_READONLY = '1';
     else delete env.WACLI_READONLY;
     debug('wacli', { mode, command: args.slice(0, 2).join(' ') });
-    const r = await spawn(cfg.bin, full, env, timeoutMs);
-    if (r.code !== 0) throw classifyFailure(r.code, r.stdout, r.stderr);
-    return parseEnvelope<T>(r.stdout, r.stderr);
+    let r: SpawnResult;
+    try {
+      r = await spawn(cfg.bin, full, env, timeoutMs);
+    } catch (e) {
+      throw mode === 'write' && e instanceof AgentError ? markUncertain(e) : e;
+    }
+    if (r.code !== 0) {
+      const err = classifyFailure(r.code, r.stdout, r.stderr);
+      throw mode === 'write' ? markUncertain(err) : err;
+    }
+    try {
+      return parseEnvelope<T>(r.stdout, r.stderr);
+    } catch (e) {
+      throw mode === 'write' && e instanceof AgentError ? markUncertain(e) : e;
+    }
   }
 
   return {
@@ -1273,7 +1345,7 @@ export function createRunner(cfg: RunnerConfig): Runner {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/runner.test.ts && pnpm typecheck`
-Expected: PASS (13 tests). The timeout test takes about 0.3 s; the oversized-output test about 1 s.
+Expected: PASS (18 tests). The timeout test takes about 0.3 s; the oversized-output test about 1 s.
 
 - [ ] **Step 5: Commit**
 
@@ -1563,7 +1635,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - `interface Resolved { jid: string; name: string | null; kind: ChatKind }`
   - `interface Resolver { resolve(input: string): Promise<Resolved> }`
   - `createResolver(runner: Runner): Resolver`
-  - `JID_RE`, `looksLikePhone(s): boolean`, `digitsOf(s): string`, `pickUnique(candidates: Resolved[], input: string): { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Resolved[] }`
+  - `JID_RE`, `looksLikePhone(s): boolean` (optional single leading `+`, 6 to 15 digits), `digitsOf(s): string`, `canonicalJid(jid): string` (strips a leading `+` and a `:device` suffix from user JIDs), `pickUnique(candidates: Resolved[], input: string): PickResult` where `PickResult = { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Resolved[] }`; a lone partial match wins only when the name contains the input
+  - Task 6 also appends `asList<T>(v: T[] | null | undefined): T[]` to `src/wacli/shape.ts` (wacli encodes an empty list as `null`); every later list read uses it
 - Errors: `ambiguous_recipient` with `details.candidates: Resolved[]` (at most 10), `not_found`, `invalid_input` for an empty string.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1573,7 +1646,8 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```ts
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createResolver, looksLikePhone, pickUnique } from '../../src/wacli/resolve.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { canonicalJid, createResolver, looksLikePhone, pickUnique } from '../../src/wacli/resolve.js';
 import { createRunner } from '../../src/wacli/runner.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, readArgvLog, removeTmp } from '../helpers/fake.js';
 
@@ -1592,6 +1666,16 @@ describe('looksLikePhone', () => {
     expect(looksLikePhone('(04) 0000-0001')).toBe(true);
     expect(looksLikePhone('Alice')).toBe(false);
     expect(looksLikePhone('12345')).toBe(false);
+    expect(looksLikePhone('61+400+000+001')).toBe(false);
+    expect(looksLikePhone('1234567890123456')).toBe(false);
+  });
+});
+
+describe('canonicalJid', () => {
+  it('strips a leading plus and a device suffix from user JIDs only', () => {
+    expect(canonicalJid('61400000001:12@s.whatsapp.net')).toBe('61400000001@s.whatsapp.net');
+    expect(canonicalJid('+61400000001@s.whatsapp.net')).toBe('61400000001@s.whatsapp.net');
+    expect(canonicalJid('120363000000000001@g.us')).toBe('120363000000000001@g.us');
   });
 });
 
@@ -1609,6 +1693,9 @@ describe('pickUnique', () => {
   });
   it('reports none', () => {
     expect(pickUnique([], 'x')).toEqual({ kind: 'none' });
+  });
+  it('rejects a single partial match whose name does not contain the input', () => {
+    expect(pickUnique([a], 'zzz')).toEqual({ kind: 'none' });
   });
 });
 
@@ -1658,6 +1745,35 @@ describe('createResolver', () => {
   it('rejects empty input', async () => {
     await expect(resolver().resolve('   ')).rejects.toMatchObject({ code: 'invalid_input' });
   });
+
+  it('canonicalises a device-suffixed JID before looking it up', async () => {
+    const r = await resolver().resolve('61400000001:12@s.whatsapp.net');
+    expect(r).toEqual({ jid: '61400000001@s.whatsapp.net', name: 'Alice', kind: 'user' });
+  });
+
+  it('rejects a national-format number instead of building a JID', async () => {
+    await expect(resolver().resolve('0400 000 001')).rejects.toMatchObject({ code: 'invalid_input' });
+    const recs = await readArgvLog(log);
+    expect(recs).toHaveLength(0);
+  });
+
+  it('treats a null list from wacli as empty', async () => {
+    const dir = path.join(tmp, 'fixtures');
+    await mkdir(dir);
+    for (const name of ['chats_list', 'contacts_search']) {
+      await writeFile(path.join(dir, `${name}.json`), '{"success":true,"data":null,"error":null}\n');
+    }
+    await expect(resolver({ FAKE_WACLI_FIXTURES: dir }).resolve('Nobody')).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('accepts a lone chat only when its name contains the input', async () => {
+    const dir = path.join(tmp, 'fixtures');
+    await mkdir(dir);
+    await writeFile(path.join(dir, 'chats_list.json'), '{"success":true,"data":[{"jid":"120363000000000001@g.us","kind":"group","name":"Family","last_message_ts":"2026-10-19T09:00:00Z","archived":false,"pinned":false,"muted_until":0,"unread":false,"unread_count":0}],"error":null}\n');
+    const r = resolver({ FAKE_WACLI_FIXTURES: dir, FAKE_WACLI_EMPTY: 'contacts search' });
+    expect(await r.resolve('fam')).toEqual({ jid: '120363000000000001@g.us', name: 'Family', kind: 'group' });
+    await expect(r.resolve('zzz')).rejects.toMatchObject({ code: 'not_found' });
+  });
 });
 ```
 
@@ -1673,7 +1789,7 @@ Expected: FAIL, module not found.
 ```ts
 import { AgentError } from '../errors.js';
 import type { Runner } from './runner.js';
-import { kindFromJid, kindFromWacli, nonEmpty, type ChatKind, type WacliChat, type WacliContact, type WacliResolution } from './shape.js';
+import { asList, kindFromJid, kindFromWacli, nonEmpty, type ChatKind, type WacliChat, type WacliContact, type WacliResolution } from './shape.js';
 
 export interface Resolved { jid: string; name: string | null; kind: ChatKind }
 export interface Resolver { resolve(input: string): Promise<Resolved> }
@@ -1684,19 +1800,31 @@ export function digitsOf(s: string): string {
   return s.replace(/\D/g, '');
 }
 
+/** An optional single leading plus, then digits with spaces, dashes or parentheses, 6 to 15 digits in all. */
 export function looksLikePhone(s: string): boolean {
   const t = s.trim();
-  return /^[+\d\s()\-]+$/.test(t) && digitsOf(t).length >= 6;
+  const n = digitsOf(t).length;
+  return /^\+?[\d\s()\-]+$/.test(t) && n >= 6 && n <= 15;
 }
 
-export type Pick = { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Resolved[] };
+/** Strips a leading + and a :device suffix from user JIDs so one person has one spelling. */
+export function canonicalJid(jid: string): string {
+  if (!jid.endsWith('@s.whatsapp.net')) return jid;
+  const user = (jid.split('@')[0] ?? '').replace(/^\+/, '').split(':')[0] ?? '';
+  return `${user}@s.whatsapp.net`;
+}
 
-export function pickUnique(candidates: Resolved[], input: string): Pick {
+export type PickResult = { kind: 'none' } | { kind: 'one'; value: Resolved } | { kind: 'many'; candidates: Resolved[] };
+
+export function pickUnique(candidates: Resolved[], input: string): PickResult {
   if (candidates.length === 0) return { kind: 'none' };
   const needle = input.trim().toLowerCase();
-  const exact = candidates.filter((c) => (c.name ?? '').toLowerCase() === needle);
+  const exact = candidates.filter((c) => (c.name ?? '').trim().toLowerCase() === needle);
   if (exact.length === 1) return { kind: 'one', value: exact[0]! };
-  if (candidates.length === 1) return { kind: 'one', value: candidates[0]! };
+  if (candidates.length === 1) {
+    const only = candidates[0]!;
+    return (only.name ?? '').toLowerCase().includes(needle) ? { kind: 'one', value: only } : { kind: 'none' };
+  }
   return { kind: 'many', candidates: candidates.slice(0, 10) };
 }
 
@@ -1707,28 +1835,32 @@ function ambiguous(input: string, candidates: Resolved[]): AgentError {
 }
 
 export function createResolver(runner: Runner): Resolver {
-  async function byJid(jid: string): Promise<Resolved> {
-    const chats = await runner.read<WacliChat[]>(['chats', 'list', `--query=${jid}`, '--limit=5']);
+  async function byJid(input: string): Promise<Resolved> {
+    const jid = canonicalJid(input);
+    const chats = asList(await runner.read<WacliChat[] | null>(['chats', 'list', `--query=${jid}`, '--limit=5']));
     const hit = chats.find((c) => c.jid === jid);
     return { jid, name: hit ? nonEmpty(hit.name) : null, kind: hit ? kindFromWacli(hit.kind, jid) : kindFromJid(jid) };
   }
 
   async function byPhone(input: string): Promise<Resolved> {
     const digits = digitsOf(input);
-    const results = await runner.read<WacliResolution[]>(['contacts', 'resolve', '--', digits]);
+    if (digits.startsWith('0')) {
+      throw new AgentError('invalid_input', `"${input.trim()}" looks like a national number. Use the international format with the country code, for example +61 400 000 001.`);
+    }
+    const results = asList(await runner.read<WacliResolution[] | null>(['contacts', 'resolve', '--', digits]));
     const r = results[0];
-    if (r && r.resolved && r.jid) return { jid: r.jid, name: nonEmpty(r.name), kind: 'user' };
+    if (r && r.resolved && r.jid) return { jid: canonicalJid(r.jid), name: nonEmpty(r.name), kind: 'user' };
     return { jid: `${digits}@s.whatsapp.net`, name: null, kind: 'user' };
   }
 
   async function byName(input: string): Promise<Resolved> {
-    const chats = await runner.read<WacliChat[]>(['chats', 'list', `--query=${input}`, '--limit=10']);
+    const chats = asList(await runner.read<WacliChat[] | null>(['chats', 'list', `--query=${input}`, '--limit=10']));
     const fromChats = pickUnique(chats.map((c) => ({ jid: c.jid, name: nonEmpty(c.name), kind: kindFromWacli(c.kind, c.jid) })), input);
     if (fromChats.kind === 'one') return fromChats.value;
     if (fromChats.kind === 'many') throw ambiguous(input, fromChats.candidates);
 
-    const contacts = await runner.read<WacliContact[]>(['contacts', 'search', '--limit=10', '--', input]);
-    const fromContacts = pickUnique(contacts.map((c) => ({ jid: c.jid, name: nonEmpty(c.name) ?? nonEmpty(c.alias), kind: 'user' as const })), input);
+    const contacts = asList(await runner.read<WacliContact[] | null>(['contacts', 'search', '--limit=10', '--', input]));
+    const fromContacts = pickUnique(contacts.map((c) => ({ jid: canonicalJid(c.jid), name: nonEmpty(c.name) ?? nonEmpty(c.alias), kind: 'user' as const })), input);
     if (fromContacts.kind === 'one') return fromContacts.value;
     if (fromContacts.kind === 'many') throw ambiguous(input, fromContacts.candidates);
     throw new AgentError('not_found', `No chat or contact matches "${input}". Pass a phone number or JID.`);
@@ -1749,7 +1881,7 @@ export function createResolver(runner: Runner): Resolver {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/resolve.test.ts && pnpm typecheck`
-Expected: PASS (13 tests).
+Expected: PASS (19 tests). Also add `asList` and its test to `src/wacli/shape.ts` and `test/unit/shape.test.ts` (see Interfaces).
 
 - [ ] **Step 5: Commit**
 
@@ -1769,14 +1901,14 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `AgentError` (Task 2), `ensurePrivateDir` (Task 2).
-- Produces: `PolicySchema` (zod), `type Policy`, `DEFAULT_POLICY: Policy`, `loadPolicy(file: string): Promise<Policy>` (missing file returns defaults, invalid file throws `invalid_input`), `savePolicy(file: string, policy: Policy): Promise<void>` (validates, writes 0600 atomically), `type ConfirmMode = 'always' | 'unlisted' | 'never'`.
+- Produces: `PolicySchema` (zod), `type Policy`, `DEFAULT_POLICY: Policy`, `loadPolicy(file: string): Promise<Policy>` (missing file returns defaults, invalid file throws `invalid_input`), `savePolicy(file: string, policy: Policy): Promise<void>` (validates with `invalid_input` naming the file, writes 0600 atomically); `fileRoots` entries must be absolute paths; unreadable policy files are `invalid_input` too, `type ConfirmMode = 'always' | 'unlisted' | 'never'`.
 
 - [ ] **Step 1: Write the failing tests**
 
 `test/unit/policy-schema.test.ts`:
 
 ```ts
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_POLICY, loadPolicy, PolicySchema, savePolicy } from '../../src/policy/schema.js';
@@ -1822,6 +1954,24 @@ describe('policy schema', () => {
     await writeFile(file, '{"version":1,"writes":{}}');
     await expect(loadPolicy(file)).rejects.toMatchObject({ code: 'invalid_input' });
   });
+
+  it('rejects relative file roots and accepts absolute ones', () => {
+    expect(PolicySchema.safeParse({ ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, fileRoots: ['Documents'] } }).success).toBe(false);
+    expect(PolicySchema.safeParse({ ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, fileRoots: ['/tmp'] } }).success).toBe(true);
+  });
+
+  it('throws invalid_input from savePolicy for a bad policy and writes nothing', async () => {
+    const file = path.join(tmp, 'cfg', 'policy.json');
+    await expect(savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: [''] } }))
+      .rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining(file) });
+    await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('throws invalid_input when the policy path cannot be read', async () => {
+    const dir = path.join(tmp, 'policy.json');
+    await mkdir(dir);
+    await expect(loadPolicy(dir)).rejects.toMatchObject({ code: 'invalid_input', message: expect.stringContaining('EISDIR') });
+  });
 });
 ```
 
@@ -1853,7 +2003,7 @@ export const PolicySchema = z.strictObject({
       perHour: z.int().min(1).max(1000),
       minGapSeconds: z.int().min(0).max(3600),
     }),
-    fileRoots: z.array(z.string().min(1)).max(50),
+    fileRoots: z.array(z.string().min(1).refine((p) => path.isAbsolute(p), 'must be an absolute path')).max(50),
   }),
   limits: z.strictObject({
     maxResults: z.int().min(1).max(200),
@@ -1897,13 +2047,18 @@ export const DEFAULT_POLICY: Policy = {
   },
 };
 
+function describeIssues(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+}
+
 export async function loadPolicy(file: string): Promise<Policy> {
   let raw: string;
   try {
     raw = await readFile(file, 'utf8');
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return structuredClone(DEFAULT_POLICY);
-    throw e;
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return structuredClone(DEFAULT_POLICY);
+    throw new AgentError('invalid_input', `${file} could not be read${code ? ` (${code})` : ''}`);
   }
   let parsed: unknown;
   try {
@@ -1912,15 +2067,14 @@ export async function loadPolicy(file: string): Promise<Policy> {
     throw new AgentError('invalid_input', `${file} is not valid JSON`);
   }
   const result = PolicySchema.safeParse(parsed);
-  if (!result.success) {
-    const issues = result.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
-    throw new AgentError('invalid_input', `${file} is invalid: ${issues}`);
-  }
+  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error)}`);
   return result.data;
 }
 
 export async function savePolicy(file: string, policy: Policy): Promise<void> {
-  const data = PolicySchema.parse(policy);
+  const result = PolicySchema.safeParse(policy);
+  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error)}`);
+  const data = result.data;
   await ensurePrivateDir(path.dirname(file));
   const tmp = `${file}.${process.pid}.tmp`;
   await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
@@ -1932,7 +2086,7 @@ export async function savePolicy(file: string, policy: Policy): Promise<void> {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/policy-schema.test.ts && pnpm typecheck`
-Expected: PASS (5 tests).
+Expected: PASS (8 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1969,13 +2123,15 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { decide, fileInsideRoots, isInsideRoot, matchesAllow, type DecideInput } from '../../src/policy/engine.js';
+import { decide, fileInsideRoots, isInsideRoot, matchesAllow, sameAllowTarget, type DecideInput } from '../../src/policy/engine.js';
 import { DEFAULT_POLICY, type Policy } from '../../src/policy/schema.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 const alice = { jid: '61400000001@s.whatsapp.net', name: 'Alice', kind: 'user' as const };
 const family = { jid: '120363000000000001@g.us', name: 'Family', kind: 'group' as const };
 const channel = { jid: '1@newsletter', name: 'News', kind: 'channel' as const };
+const broadcast = { jid: 'status@broadcast', name: null, kind: 'broadcast' as const };
+const unknown = { jid: 'x@weird', name: 'Odd', kind: 'unknown' as const };
 const calm = { countLastHour: 0, secondsSinceLast: null, secondsUntilWindowFrees: 0 };
 
 function policy(over: Partial<Policy['writes']> = {}): Policy {
@@ -1986,12 +2142,29 @@ function input(over: Partial<DecideInput> = {}): DecideInput {
 }
 
 describe('matchesAllow', () => {
-  it('matches by JID, formatted phone and case-insensitive name', () => {
+  it('matches by JID or phone number only, never by name', () => {
     expect(matchesAllow(['61400000001@s.whatsapp.net'], alice)).toBe(true);
     expect(matchesAllow(['+61 400 000 001'], alice)).toBe(true);
-    expect(matchesAllow(['alice'], alice)).toBe(true);
+    expect(matchesAllow(['+61400000001@s.whatsapp.net'], alice)).toBe(true);
+    expect(matchesAllow(['61400000001:7@s.whatsapp.net'], alice)).toBe(true);
+    expect(matchesAllow(['61400000001@S.WHATSAPP.NET'], alice)).toBe(true);
+    expect(matchesAllow(['61400000001@s.whatsapp.net'], { ...alice, jid: '61400000001:7@s.whatsapp.net' })).toBe(true);
+    expect(matchesAllow(['alice'], alice)).toBe(false);
+    expect(matchesAllow(['Alice'], alice)).toBe(false);
     expect(matchesAllow(['+61 400 000 002', 'Bob'], alice)).toBe(false);
     expect(matchesAllow([], alice)).toBe(false);
+  });
+});
+
+describe('sameAllowTarget', () => {
+  it('treats spellings of one number, its JID forms, and exact text as the same target', () => {
+    expect(sameAllowTarget('+61 400 000 001', '61400000001')).toBe(true);
+    expect(sameAllowTarget('+61400000001', '61400000001@s.whatsapp.net')).toBe(true);
+    expect(sameAllowTarget('61400000001:7@s.whatsapp.net', '61400000001@S.WHATSAPP.NET')).toBe(true);
+    expect(sameAllowTarget('120363000000000001@g.us', '120363000000000001@g.us')).toBe(true);
+    expect(sameAllowTarget('+61 400 000 001', '+61 400 000 002')).toBe(false);
+    expect(sameAllowTarget('Alice', 'alice')).toBe(true);
+    expect(sameAllowTarget('Alice', '+61400000001')).toBe(false);
   });
 });
 
@@ -2004,8 +2177,10 @@ describe('decide', () => {
     expect(decide(input({ tool: 'mark_read', policy: policy({ confirm: 'always' }) }))).toEqual({ kind: 'allow' });
     expect(decide(input({ tool: 'mark_read', recipient: family }))).toEqual({ kind: 'allow' });
   });
-  it('refuses channels', () => {
-    expect(decide(input({ recipient: channel, policy: policy({ confirm: 'never' }) }))).toMatchObject({ kind: 'deny', code: 'unsupported_target' });
+  it('refuses channels, broadcast lists and unknown kinds', () => {
+    for (const target of [channel, broadcast, unknown]) {
+      expect(decide(input({ recipient: target, policy: policy({ confirm: 'never' }) }))).toMatchObject({ kind: 'deny', code: 'unsupported_target' });
+    }
   });
   it('gates groups behind writes.groups', () => {
     expect(decide(input({ recipient: family, policy: policy({ confirm: 'never' }) }))).toMatchObject({ kind: 'deny', code: 'groups_disabled' });
@@ -2029,8 +2204,8 @@ describe('decide', () => {
     expect(decide(input({ answer: 'declined' }))).toMatchObject({ kind: 'deny', code: 'confirmation_declined' });
   });
   it('skips confirmation for allowlisted recipients in unlisted mode', () => {
-    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['Alice'] }) }))).toEqual({ kind: 'allow' });
-    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['Bob'] }) }))).toEqual({ kind: 'confirm' });
+    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 001'] }) }))).toEqual({ kind: 'allow' });
+    expect(decide(input({ policy: policy({ confirm: 'unlisted', allow: ['+61 400 000 002'] }) }))).toEqual({ kind: 'confirm' });
   });
   it('denies when confirmation is needed but the client cannot show a form', () => {
     expect(decide(input({ clientCanConfirm: false }))).toMatchObject({ kind: 'deny', code: 'confirmation_unavailable' });
@@ -2082,7 +2257,7 @@ Expected: FAIL, module not found.
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { Resolved } from '../wacli/resolve.js';
-import { digitsOf, looksLikePhone } from '../wacli/resolve.js';
+import { canonicalJid, digitsOf, JID_RE, looksLikePhone } from '../wacli/resolve.js';
 import type { Policy } from './schema.js';
 
 export type WriteTool = 'send_text' | 'send_file' | 'react' | 'mark_read';
@@ -2110,7 +2285,7 @@ export type Decision =
 
 export const DENY_MESSAGES: Record<DenyCode, string> = {
   writes_disabled: 'Sending is turned off in the policy. The person can enable it with: whatsapp-agent policy enable',
-  unsupported_target: 'Channels are read-only in this version.',
+  unsupported_target: 'Only people and groups can receive messages. Channels, broadcast lists and unknown chat types are read-only in this version.',
   groups_disabled: 'Sending to groups is turned off. The person can enable it with: whatsapp-agent policy set groups on',
   file_outside_roots: 'That file is outside the allowed folders. The person can add a folder with: whatsapp-agent policy add-file-root <dir>',
   rate_limited: 'Send rate limit reached. Wait before sending again.',
@@ -2122,16 +2297,32 @@ export function jidUser(jid: string): string {
   return (jid.split('@')[0] ?? '').split(':')[0] ?? '';
 }
 
+/** Entries are phone numbers (compared by digits) or JIDs. Names never match: display names are chosen by other people. */
 export function matchesAllow(allow: string[], r: Resolved): boolean {
-  const user = jidUser(r.jid);
+  const jid = canonicalJid(r.jid).toLowerCase();
+  const user = jidUser(jid);
   for (const raw of allow) {
-    const e = raw.trim();
+    const e = raw.trim().toLowerCase();
     if (e === '') continue;
-    if (e.toLowerCase() === r.jid.toLowerCase()) return true;
+    if (JID_RE.test(e) && canonicalJid(e) === jid) return true;
     if (looksLikePhone(e) && digitsOf(e) === user) return true;
-    if (r.name && e.toLowerCase() === r.name.toLowerCase()) return true;
   }
   return false;
+}
+
+/** True when two allowlist entries denote the same recipient: phones by digits, user JIDs by their number, other JIDs canonical, else exact text, all case-insensitive. */
+export function sameAllowTarget(a: string, b: string): boolean {
+  const key = (raw: string): string => {
+    const s = raw.trim();
+    const l = s.toLowerCase();
+    if (JID_RE.test(l)) {
+      const c = canonicalJid(l);
+      return c.endsWith('@s.whatsapp.net') ? `user:${jidUser(c)}` : `jid:${c}`;
+    }
+    if (looksLikePhone(s)) return `user:${digitsOf(s)}`;
+    return `text:${l}`;
+  };
+  return key(a) === key(b);
 }
 
 function deny(code: DenyCode, retryAfterSeconds?: number): Decision {
@@ -2145,7 +2336,7 @@ export function decide(i: DecideInput): Decision {
   const w = i.policy.writes;
   if (!w.enabled) return deny('writes_disabled');
   if (i.tool === 'mark_read') return { kind: 'allow' };
-  if (i.recipient.kind === 'channel') return deny('unsupported_target');
+  if (i.recipient.kind !== 'user' && i.recipient.kind !== 'group') return deny('unsupported_target');
   if (i.recipient.kind === 'group' && !w.groups) return deny('groups_disabled');
   if (i.tool === 'send_file' && i.fileInsideRoots !== true) return deny('file_outside_roots');
 
@@ -2219,7 +2410,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 `test/unit/ratelimit.test.ts`:
 
 ```ts
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createRateLimiter } from '../../src/policy/ratelimit.js';
@@ -2256,6 +2447,15 @@ describe('rate limiter', () => {
     expect((await rl.snapshot(t0)).countLastHour).toBe(0);
     await rl.record(t0);
     expect((await rl.snapshot(t0)).countLastHour).toBe(1);
+  });
+
+  it('serialises overlapping records so none are lost', async () => {
+    const file = path.join(tmp, 'rl.json');
+    const rl = createRateLimiter(file);
+    await Promise.all([rl.record(t0), rl.record(plus(1)), rl.record(plus(2)), rl.record(plus(3))]);
+    expect((await rl.snapshot(plus(4))).countLastHour).toBe(4);
+    const leftovers = (await readdir(tmp)).filter((n) => n.endsWith('.tmp'));
+    expect(leftovers).toEqual([]);
   });
 });
 ```
@@ -2334,9 +2534,8 @@ async function readSends(file: string): Promise<number[]> {
   }
 }
 
-async function writeSends(file: string, sends: number[]): Promise<void> {
+async function writeSends(file: string, tmp: string, sends: number[]): Promise<void> {
   await ensurePrivateDir(path.dirname(file));
-  const tmp = `${file}.${process.pid}.tmp`;
   await writeFile(tmp, JSON.stringify({ sends: sends.map((n) => new Date(n).toISOString()) }), { mode: 0o600 });
   await chmod(tmp, 0o600);
   await rename(tmp, file);
@@ -2347,9 +2546,18 @@ function prune(sends: number[], now: Date): number[] {
   return sends.filter((n) => n > cutoff).sort((a, b) => a - b);
 }
 
+/** Operations run one at a time per limiter so overlapping calls cannot interleave their file writes. */
 export function createRateLimiter(file: string): RateLimiter {
+  let queue: Promise<unknown> = Promise.resolve();
+  let seq = 0;
+  const serial = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = queue.then(fn, fn);
+    queue = next.catch(() => undefined);
+    return next;
+  };
+
   return {
-    async snapshot(now) {
+    snapshot: (now) => serial(async () => {
       const sends = prune(await readSends(file), now);
       const last = sends[sends.length - 1];
       const oldest = sends[0];
@@ -2358,12 +2566,13 @@ export function createRateLimiter(file: string): RateLimiter {
         secondsSinceLast: last === undefined ? null : Math.floor((now.getTime() - last) / 1000),
         secondsUntilWindowFrees: oldest === undefined ? 0 : Math.max(0, Math.ceil((oldest + WINDOW_MS - now.getTime()) / 1000)),
       };
-    },
-    async record(now) {
+    }),
+    record: (now) => serial(async () => {
       const sends = prune(await readSends(file), now);
       sends.push(now.getTime());
-      await writeSends(file, sends);
-    },
+      seq += 1;
+      await writeSends(file, `${file}.${process.pid}.${seq}.tmp`, sends);
+    }),
   };
 }
 ```
@@ -2424,7 +2633,7 @@ export async function readAudit(file: string, opts: { limit?: number; since?: Da
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/ratelimit.test.ts test/unit/audit.test.ts && pnpm typecheck`
-Expected: PASS (5 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2449,7 +2658,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - `ok(structured): CallToolResult`, `effectiveLimit(requested: number | undefined, fallback: number, maxResults: number): number`
   - zod fragments: `ChatKindSchema`, `ResolvedSchema`, `ChatSchema`, `MessageSchema`, `PageSchema`, `ContactSchema`, `GroupSchema`, `ParticipantSchema`, `SendResultSchema`, `dateInput`, `messageIdInput`, `limitInput`
   - `interface PolicySummary { writes_enabled: boolean; confirm: ConfirmMode; allow_count: number; groups_enabled: boolean; file_roots_count: number; account: string | null }`, `summarizePolicy(p: Policy): PolicySummary`
-  - `interface StatusInfo { wacli_version: string | null; min_version_ok: boolean; authenticated: boolean; phone: string | null; connection_state: string | null; session_revoked: boolean; store_dir: string | null; last_sync_at: string | null; heartbeat_at: string | null; heartbeat_age_seconds: number | null; counts: { chats: number | null; messages: number | null } }`, `getStatus(runner: Runner, now: Date): Promise<StatusInfo>`, `readHeartbeat(file: string): Promise<Date | null>`
+  - `interface StatusInfo { wacli_version: string | null; min_version_ok: boolean; authenticated: boolean; phone: string | null; connection_state: string | null; session_revoked: boolean; store_dir: string | null; last_sync_at: string | null; heartbeat_at: string | null; heartbeat_age_seconds: number | null; counts: { chats: number | null; messages: number | null } }`, `getStatus(runner: Runner, now: Date): Promise<StatusInfo>`, `cachedVersion(runner: Runner): Promise<string | null>` (one `wacli version` per runner, cached), `readHeartbeat(file: string): Promise<Date | null>`
   - Test harness: `makeHarness(opts?: HarnessOptions): Promise<Harness>` with `Harness = { client; deps; tmp; audits: AuditRecord[]; elicitations: string[]; argv(): Promise<ArgvRecord[]>; call(name, args?): Promise<ToolResult>; close(): Promise<void> }` and `HarnessOptions = { policy?: (p: Policy) => Policy; env?: Record<string, string>; elicitation?: 'form' | 'none' | 'url-only'; elicit?: (message: string) => { action: 'accept' | 'decline' | 'cancel'; content?: Record<string, unknown> }; now?: Date }`, `ToolResult = { isError?: boolean; structuredContent?: unknown; content: Array<{ type: string; text?: string; mimeType?: string; data?: string }> }`.
 - Tool names registered here: `whatsapp_status`, `list_chats`, `find_contacts`, `list_groups`, `get_group`.
 
@@ -2571,6 +2780,17 @@ import { meetsMinimum } from '../version.js';
 import type { Runner } from './runner.js';
 import { phoneFromJid, toIso, type WacliDoctor } from './shape.js';
 
+/** wacli's version is read once per runner (so once per process) and cached, but only once it was read successfully. */
+const versionCache = new WeakMap<Runner, string>();
+
+export async function cachedVersion(runner: Runner): Promise<string | null> {
+  const cached = versionCache.get(runner);
+  if (cached !== undefined) return cached;
+  const version = await runner.version();
+  if (version !== null) versionCache.set(runner, version);
+  return version;
+}
+
 export interface StatusInfo {
   wacli_version: string | null;
   min_version_ok: boolean;
@@ -2595,7 +2815,7 @@ export async function readHeartbeat(file: string): Promise<Date | null> {
 }
 
 export async function getStatus(runner: Runner, now: Date): Promise<StatusInfo> {
-  const version = await runner.version();
+  const version = await cachedVersion(runner);
   let doctor: WacliDoctor | null = null;
   let doctorError: AgentError | null = null;
   try {
@@ -2774,6 +2994,18 @@ describe('whatsapp_status', () => {
     const r = await h.call('whatsapp_status');
     expect(r.structuredContent).toMatchObject({ wacli_version: '0.21.0', min_version_ok: false });
   });
+
+  it('reads the wacli version once per process but retries while it is unknown', async () => {
+    h = await makeHarness();
+    await h.call('whatsapp_status');
+    await h.call('whatsapp_status');
+    expect((await h.argv()).filter((r) => r.key === 'version')).toHaveLength(1);
+    await h.close();
+    h = await makeHarness({ env: { FAKE_WACLI_VERSION: 'dev' } });
+    await h.call('whatsapp_status');
+    await h.call('whatsapp_status');
+    expect((await h.argv()).filter((r) => r.key === 'version')).toHaveLength(2);
+  });
 });
 
 describe('list_chats', () => {
@@ -2929,7 +3161,7 @@ export function registerStatusTool(server: McpServer, deps: ServerDeps): void {
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { toToolError } from '../../errors.js';
-import { toChat, type WacliChat } from '../../wacli/shape.js';
+import { asList, toChat, type WacliChat } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { effectiveLimit, ok } from '../result.js';
 import { ChatSchema, limitInput } from '../schemas.js';
@@ -2957,7 +3189,7 @@ export function registerChatTools(server: McpServer, deps: ServerDeps): void {
         if (query) args.push(`--query=${query}`);
         if (unread_only) args.push('--unread');
         if (!include_archived) args.push('--no-archived');
-        const rows = await deps.runner.read<WacliChat[]>(args);
+        const rows = asList(await deps.runner.read<WacliChat[] | null>(args));
         const now = deps.now();
         return ok({ chats: rows.slice(0, n).map((r) => toChat(r, now)) });
       } catch (e) {
@@ -2974,7 +3206,7 @@ export function registerChatTools(server: McpServer, deps: ServerDeps): void {
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { toToolError } from '../../errors.js';
-import { toContact, type WacliContact } from '../../wacli/shape.js';
+import { asList, toContact, type WacliContact } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { effectiveLimit, ok } from '../result.js';
 import { ContactSchema, limitInput } from '../schemas.js';
@@ -2996,7 +3228,7 @@ export function registerContactTools(server: McpServer, deps: ServerDeps): void 
     async ({ query, limit }) => {
       try {
         const n = effectiveLimit(limit, 20, limits.maxResults);
-        const rows = await deps.runner.read<WacliContact[]>(['contacts', 'search', `--limit=${n}`, '--', query]);
+        const rows = asList(await deps.runner.read<WacliContact[] | null>(['contacts', 'search', `--limit=${n}`, '--', query]));
         return ok({ contacts: rows.slice(0, n).map(toContact) });
       } catch (e) {
         return toToolError(e);
@@ -3012,7 +3244,7 @@ export function registerContactTools(server: McpServer, deps: ServerDeps): void 
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { AgentError, toToolError } from '../../errors.js';
-import { toGroup, toParticipant, type WacliGroup, type WacliParticipant } from '../../wacli/shape.js';
+import { asList, toGroup, toParticipant, type WacliGroup, type WacliParticipant } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { effectiveLimit, ok } from '../result.js';
 import { GroupSchema, limitInput, ParticipantSchema, recipientInput } from '../schemas.js';
@@ -3037,7 +3269,7 @@ export function registerGroupTools(server: McpServer, deps: ServerDeps): void {
         const n = effectiveLimit(limit, 50, limits.maxResults);
         const args = ['groups', 'list', `--limit=${n}`];
         if (query) args.push(`--query=${query}`);
-        const rows = await deps.runner.read<WacliGroup[]>(args);
+        const rows = asList(await deps.runner.read<WacliGroup[] | null>(args));
         return ok({ groups: rows.slice(0, n).map(toGroup) });
       } catch (e) {
         return toToolError(e);
@@ -3058,10 +3290,10 @@ export function registerGroupTools(server: McpServer, deps: ServerDeps): void {
       try {
         const resolved = await deps.resolver.resolve(group);
         if (resolved.kind !== 'group') throw new AgentError('invalid_input', `"${group}" is not a group (it is a ${resolved.kind}).`);
-        const rows = await deps.runner.read<WacliGroup[]>(['groups', 'list', `--query=${resolved.jid}`, '--limit=5']);
+        const rows = asList(await deps.runner.read<WacliGroup[] | null>(['groups', 'list', `--query=${resolved.jid}`, '--limit=5']));
         const row = rows.find((g) => g.JID === resolved.jid);
         const base = row ? toGroup(row) : { jid: resolved.jid, name: resolved.name, owner_jid: null, is_community: false, linked_parent_jid: null, created_at: null };
-        const participants = (await deps.runner.read<WacliParticipant[]>(['groups', 'participants', 'list', `--jid=${resolved.jid}`])).map(toParticipant);
+        const participants = asList(await deps.runner.read<WacliParticipant[] | null>(['groups', 'participants', 'list', `--jid=${resolved.jid}`])).map(toParticipant);
         return ok({ ...base, name: base.name ?? resolved.name, participant_count: participants.length, participants });
       } catch (e) {
         return toToolError(e);
@@ -3074,7 +3306,7 @@ export function registerGroupTools(server: McpServer, deps: ServerDeps): void {
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/integration/read-tools.test.ts && pnpm typecheck`
-Expected: PASS (10 tests). If the SDK reports a schema conversion error for `z.int()`, replace it with `z.number().int()` in `schemas.ts`.
+Expected: PASS (11 tests). If the SDK reports a schema conversion error for `z.int()`, replace it with `z.number().int()` in `schemas.ts`.
 
 - [ ] **Step 7: Commit**
 
@@ -3177,8 +3409,8 @@ describe('download_media', () => {
     expect((await realpath(s.path)).startsWith(mediaDir + path.sep)).toBe(true);
     expect(path.basename(s.path)).toBe('MSG3.png');
     expect(s.mime).toBe('image/png');
-    expect(s.size).toBe(68);
-    expect((await stat(s.path)).size).toBe(68);
+    expect(s.size).toBe(70);
+    expect((await stat(s.path)).size).toBe(70);
     expect((await stat(path.dirname(s.path))).mode & 0o777).toBe(0o700);
     const recs = await h.argv();
     const dl = recs.find((x) => x.key === 'media download')!;
@@ -3212,7 +3444,7 @@ Expected: FAIL, tools not found (`isError` or "Tool read_messages not found").
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { toToolError } from '../../errors.js';
-import { toMessage, type WacliContext, type WacliMessagePage } from '../../wacli/shape.js';
+import { asList, toMessage, type WacliContext, type WacliMessagePage } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { effectiveLimit, ok } from '../result.js';
 import { dateInput, limitInput, MessageSchema, messageIdInput, PageSchema, recipientInput, ResolvedSchema } from '../schemas.js';
@@ -3250,7 +3482,7 @@ export function registerMessageTools(server: McpServer, deps: ServerDeps): void 
         if (after) args.push(`--after=${after}`);
         if (cursor) args.push(`--cursor=${cursor}`);
         const page = await deps.runner.read<WacliMessagePage>(args);
-        const messages = page.messages.slice(0, n).map(toMessage).reverse();
+        const messages = asList(page.messages).slice(0, n).map(toMessage).reverse();
         return ok({ chat: resolved, order: 'oldest_first', messages, page: pageOf(page) });
       } catch (e) {
         return toToolError(e);
@@ -3290,7 +3522,7 @@ export function registerMessageTools(server: McpServer, deps: ServerDeps): void 
         if (cursor) args.push(`--cursor=${cursor}`);
         args.push('--', query);
         const page = await deps.runner.read<WacliMessagePage>(args);
-        return ok({ messages: page.messages.slice(0, n).map(toMessage), page: pageOf(page) });
+        return ok({ messages: asList(page.messages).slice(0, n).map(toMessage), page: pageOf(page) });
       } catch (e) {
         return toToolError(e);
       }
@@ -3317,7 +3549,7 @@ export function registerMessageTools(server: McpServer, deps: ServerDeps): void 
         const ctx = await deps.runner.read<WacliContext>([
           'messages', 'context', `--chat=${resolved.jid}`, `--id=${message_id}`, `--before=${before ?? 5}`, `--after=${after ?? 5}`,
         ]);
-        return ok({ chat: resolved, target_id: message_id, messages: ctx.messages.map(toMessage) });
+        return ok({ chat: resolved, target_id: message_id, messages: asList(ctx.messages).map(toMessage) });
       } catch (e) {
         return toToolError(e);
       }
@@ -3341,6 +3573,17 @@ import { MEDIA_TIMEOUT_MS } from '../../wacli/runner.js';
 import { nonEmpty, type WacliMediaDownload } from '../../wacli/shape.js';
 import type { ServerDeps } from '../deps.js';
 import { messageIdInput, recipientInput } from '../schemas.js';
+
+/** Only formats every MCP host accepts are inlined, and only when the bytes match the declared type. */
+const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+export function sniffImageMime(bytes: Buffer): string | null {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 6 && ['GIF87a', 'GIF89a'].includes(bytes.subarray(0, 6).toString('latin1'))) return 'image/gif';
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('latin1') === 'RIFF' && bytes.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+  return null;
+}
 
 export function registerMediaTool(server: McpServer, deps: ServerDeps): void {
   const { limits } = deps.startupPolicy;
@@ -3371,8 +3614,9 @@ export function registerMediaTool(server: McpServer, deps: ServerDeps): void {
         const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [
           { type: 'text', text: JSON.stringify(structured) },
         ];
-        if (mime && mime.startsWith('image/') && size <= policy.media.inlineImageMaxBytes) {
-          content.push({ type: 'image', data: (await readFile(real)).toString('base64'), mimeType: mime });
+        if (mime && INLINE_IMAGE_TYPES.has(mime) && size > 0 && size <= policy.media.inlineImageMaxBytes) {
+          const bytes = await readFile(real);
+          if (sniffImageMime(bytes) === mime) content.push({ type: 'image', data: bytes.toString('base64'), mimeType: mime });
         }
         return { content, structuredContent: structured };
       } catch (e) {
@@ -3396,7 +3640,7 @@ import { registerMessageTools } from './tools/messages.js';
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/integration && pnpm typecheck`
-Expected: PASS (17 tests across both integration files).
+Expected: PASS (23 tests across both integration files: 11 read-tool tests and 12 message-tool tests, the latter including the containment-guard and inline-image tests added under amendment A20; see the repository's test file for their text).
 
 - [ ] **Step 5: Commit**
 
@@ -3420,6 +3664,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - `interface HandlerCtx { mcpReq: { envelope?: unknown; inputResponses?: Record<string, unknown> } }`
   - `elicitationSupportsForm(caps: unknown): boolean`, `clientCanConfirm(server: McpServer, ctx: HandlerCtx): boolean`, `readAnswer(ctx: HandlerCtx): Answer`, `confirmationRequired(message: string): InputRequiredResult`, `ConfirmSchema`
   - Tools `send_text`, `send_file`, `react`, `mark_read`.
+- Concurrency rulings: the gate (policy load, rate snapshot, decide, and the rate record when allowed) runs inside one process-wide serialised section so two concurrent sends cannot both pass the window check; the process holds exactly one rate limiter instance (`ServerDeps.rateLimiter`).
 
 - [ ] **Step 1: Write the failing unit test for the capability rule**
 
@@ -3451,10 +3696,11 @@ describe('elicitationSupportsForm', () => {
 `test/integration/write-tools.test.ts`:
 
 ```ts
-import { mkdir, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Policy } from '../../src/policy/schema.js';
+import { makeTmp, removeTmp } from '../helpers/fake.js';
 import { errorOf, makeHarness, type Harness } from '../helpers/harness.js';
 
 let h: Harness;
@@ -3558,12 +3804,57 @@ describe('send_text', () => {
     expect(await sendArgv()).toHaveLength(2);
   });
 
+  it('serialises concurrent sends so the hourly window cannot be exceeded', async () => {
+    const now = new Date('2026-10-20T10:00:00Z');
+    h = await makeHarness({ policy: enabled({ confirm: 'never', rateLimit: { perHour: 2, minGapSeconds: 0 } }), now });
+    const results = await Promise.all(['a', 'b', 'c', 'd'].map((m) => h.call('send_text', { to: 'Alice', message: m })));
+    expect(results.filter((r) => !r.isError)).toHaveLength(2);
+    expect(results.filter((r) => r.isError && errorOf(r).error === 'rate_limited')).toHaveLength(2);
+    expect(await sendArgv()).toHaveLength(2);
+  });
+
+  it('re-checks every rule when the confirmation answer arrives', async () => {
+    h = await makeHarness({
+      policy: enabled(),
+      elicit: () => {
+        h.deps.startupPolicy.writes.enabled = false;
+        return { action: 'accept', content: { confirm: true } };
+      },
+    });
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(errorOf(r).error).toBe('writes_disabled');
+    expect(h.elicitations).toHaveLength(1);
+    expect(await sendArgv()).toHaveLength(0);
+    expect(h.audits.at(-1)).toMatchObject({ outcome: 'denied', reason: 'writes_disabled' });
+    await h.close();
+
+    h = await makeHarness({
+      policy: enabled(),
+      elicit: () => {
+        h.deps.startupPolicy.writes.rateLimit.perHour = 0;
+        return { action: 'accept', content: { confirm: true } };
+      },
+    });
+    const limited = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(errorOf(limited)).toMatchObject({ error: 'rate_limited', retry_after_seconds: expect.any(Number) });
+    expect(await sendArgv()).toHaveLength(0);
+  });
+
+  it('reports a completed send as sent even when the audit log cannot be written', async () => {
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+    h.deps.audit = async () => { throw new Error('ENOSPC: no space left on device'); };
+    const r = await h.call('send_text', { to: 'Alice', message: 'hello' });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({ sent: true, message_id: '3EB0SENT0001' });
+    expect(await sendArgv()).toHaveLength(1);
+  });
+
   it('reports an ambiguous recipient and a wacli failure as failed audits', async () => {
     h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
     expect(errorOf(await h.call('send_text', { to: 'a', message: 'x' })).error).toBe('ambiguous_recipient');
     expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'ambiguous_recipient', to_jid: null });
     await h.close();
-    h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|usync timeout' } });
+    h = await makeHarness({ policy: enabled({ confirm: 'never' }), env: { FAKE_WACLI_FAIL: 'send text|1|usync failed' } });
     expect(errorOf(await h.call('send_text', { to: 'Alice', message: 'x' })).error).toBe('wacli_error');
     expect(h.audits.at(-1)).toMatchObject({ outcome: 'failed', reason: 'wacli_error' });
   });
@@ -3571,21 +3862,24 @@ describe('send_text', () => {
 
 describe('send_file', () => {
   it('refuses without file roots, then sends with WACLI_MEDIA_ROOTS set', async () => {
-    h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
-    const dir = path.join(h.tmp, 'outbox');
-    await mkdir(dir);
-    const file = path.join(dir, 'report.pdf');
-    await writeFile(file, 'pdf');
-    expect(errorOf(await h.call('send_file', { to: 'Alice', path: file })).error).toBe('file_outside_roots');
-    await h.close();
+    const outbox = await makeTmp('wa-outbox-');
+    try {
+      const file = path.join(outbox, 'report.pdf');
+      await writeFile(file, 'pdf');
+      h = await makeHarness({ policy: enabled({ confirm: 'never' }) });
+      expect(errorOf(await h.call('send_file', { to: 'Alice', path: file })).error).toBe('file_outside_roots');
+      await h.close();
 
-    h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [dir] }) });
-    const r = await h.call('send_file', { to: 'Alice', path: file, caption: 'the report', as: 'document' });
-    expect(r.isError).toBeFalsy();
-    const [send] = (await h.argv()).filter((x) => x.key === 'send file');
-    expect(send!.argv.slice(3)).toEqual(['send', 'file', '--to=61400000001@s.whatsapp.net', `--file=${file}`, '--caption=the report', '--as=document']);
-    expect(send!.env.WACLI_MEDIA_ROOTS).toBe(dir);
-    expect(h.audits.at(-1)).toMatchObject({ tool: 'send_file', outcome: 'sent', file });
+      h = await makeHarness({ policy: enabled({ confirm: 'never', fileRoots: [outbox] }) });
+      const r = await h.call('send_file', { to: 'Alice', path: file, caption: 'the report', as: 'document' });
+      expect(r.isError).toBeFalsy();
+      const [send] = (await h.argv()).filter((x) => x.key === 'send file');
+      expect(send!.argv.slice(3)).toEqual(['send', 'file', '--to=61400000001@s.whatsapp.net', `--file=${file}`, '--caption=the report', '--as=document']);
+      expect(send!.env.WACLI_MEDIA_ROOTS).toBe(outbox);
+      expect(h.audits.at(-1)).toMatchObject({ tool: 'send_file', outcome: 'sent', file });
+    } finally {
+      await removeTmp(outbox);
+    }
   });
 
   it('rejects a relative path', async () => {
@@ -3684,6 +3978,7 @@ import path from 'node:path';
 import type { CallToolResult, InputRequiredResult, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { AgentError, toToolError } from '../../errors.js';
+import { debug } from '../../log.js';
 import type { AuditRecord } from '../../policy/audit.js';
 import { decide, fileInsideRoots, type Decision, type WriteTool } from '../../policy/engine.js';
 import type { Resolved } from '../../wacli/resolve.js';
@@ -3698,6 +3993,14 @@ const POLICY_NOTE = "Subject to the person's policy: may be disabled, may requir
 
 type Deny = Extract<Decision, { kind: 'deny' }>;
 
+/** Write gates run one at a time per process, so two concurrent sends cannot both pass the rate-limit check. */
+let writeChain: Promise<unknown> = Promise.resolve();
+function serialised<T>(fn: () => Promise<T>): Promise<T> {
+  const next = writeChain.then(fn, fn);
+  writeChain = next.catch(() => undefined);
+  return next;
+}
+
 export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
   const { limits } = deps.startupPolicy;
   const label = (r: Resolved) => (r.name ? `${r.name} (${r.jid})` : r.jid);
@@ -3706,19 +4009,33 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
     client: server.server.getClientVersion()?.name,
   });
 
+  /** Audit failures never change a tool result: a completed send must not be reported as failed. */
+  async function record(rec: AuditRecord): Promise<void> {
+    try {
+      await deps.audit(rec);
+    } catch (e) {
+      debug('audit append failed', { tool: rec.tool, outcome: rec.outcome, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  /** Decides, and when the decision is allow, records the send inside the same serialised section. mark_read is not rate limited. */
   async function gate(ctx: HandlerCtx, tool: WriteTool, recipient: Resolved, extra: { fileInsideRoots?: boolean } = {}): Promise<Decision> {
-    const policy = await deps.loadPolicy();
-    const rate = await deps.rateLimiter.snapshot(deps.now());
-    return decide({ policy, tool, recipient, ...extra, rate, clientCanConfirm: clientCanConfirm(server, ctx), answer: readAnswer(ctx) });
+    return serialised(async () => {
+      const policy = await deps.loadPolicy();
+      const rate = await deps.rateLimiter.snapshot(deps.now());
+      const decision = decide({ policy, tool, recipient, ...extra, rate, clientCanConfirm: clientCanConfirm(server, ctx), answer: readAnswer(ctx) });
+      if (decision.kind === 'allow' && tool !== 'mark_read') await deps.rateLimiter.record(deps.now());
+      return decision;
+    });
   }
 
   async function denied(tool: WriteTool, recipient: Resolved, d: Deny, extra: Partial<AuditRecord>): Promise<CallToolResult> {
-    await deps.audit({ ...base(tool, recipient), outcome: 'denied', reason: d.code, ...extra });
+    await record({ ...base(tool, recipient), outcome: 'denied', reason: d.code, ...extra });
     return toToolError(new AgentError(d.code, d.message, d.retryAfterSeconds === undefined ? {} : { retry_after_seconds: d.retryAfterSeconds }));
   }
 
   async function failed(tool: WriteTool, recipient: Resolved | null, e: unknown, extra: Partial<AuditRecord>): Promise<CallToolResult> {
-    await deps.audit({ ...base(tool, recipient), outcome: 'failed', reason: e instanceof AgentError ? e.code : 'error', ...extra });
+    await record({ ...base(tool, recipient), outcome: 'failed', reason: e instanceof AgentError ? e.code : 'error', ...extra });
     return toToolError(e);
   }
 
@@ -3745,14 +4062,13 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const d = await gate(ctx, 'send_text', recipient);
         if (d.kind === 'deny') return denied('send_text', recipient, d, { text: a.message });
         if (d.kind === 'confirm') return confirmationRequired(`Send to ${label(recipient)}?\n\n${a.message}`);
-        await deps.rateLimiter.record(deps.now());
         const argv = ['send', 'text', `--to=${recipient.jid}`, `--message=${a.message}`];
         if (a.reply_to) argv.push(`--reply-to=${a.reply_to}`);
         if (a.reply_to_sender) argv.push(`--reply-to-sender=${a.reply_to_sender}`);
         for (const m of a.mentions ?? []) argv.push(`--mention=${m}`);
         if (a.link_preview === false) argv.push('--no-preview');
         const res = await deps.runner.write<WacliSendResult>(argv);
-        await deps.audit({ ...base('send_text', recipient), outcome: 'sent', message_id: res.id, text: a.message });
+        await record({ ...base('send_text', recipient), outcome: 'sent', message_id: res.id, text: a.message });
         return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
         return failed('send_text', recipient, e, { text: a.message });
@@ -3787,14 +4103,13 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
           const size = await stat(a.path).then((s) => `${s.size} bytes`).catch(() => 'unknown size');
           return confirmationRequired(`Send file to ${label(recipient)}?\n\n${a.path} (${size})${a.caption ? `\n${a.caption}` : ''}`);
         }
-        await deps.rateLimiter.record(deps.now());
         const argv = ['send', 'file', `--to=${recipient.jid}`, `--file=${a.path}`];
         if (a.caption) argv.push(`--caption=${a.caption}`);
         if (a.as && a.as !== 'auto') argv.push(`--as=${a.as}`);
         if (a.filename) argv.push(`--filename=${a.filename}`);
-        const env = policy.writes.fileRoots.length > 0 ? { WACLI_MEDIA_ROOTS: policy.writes.fileRoots.join(path.delimiter) } : {};
+        const env: Record<string, string> = policy.writes.fileRoots.length > 0 ? { WACLI_MEDIA_ROOTS: policy.writes.fileRoots.join(path.delimiter) } : {};
         const res = await deps.runner.write<WacliSendResult>(argv, { env });
-        await deps.audit({ ...base('send_file', recipient), outcome: 'sent', message_id: res.id, file: a.path, text: a.caption });
+        await record({ ...base('send_file', recipient), outcome: 'sent', message_id: res.id, file: a.path, text: a.caption });
         return ok({ sent: true, message_id: res.id, to: recipient, timestamp: deps.now().toISOString() });
       } catch (e) {
         return failed('send_file', recipient, e, { file: a.path });
@@ -3823,11 +4138,10 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const d = await gate(ctx, 'react', recipient);
         if (d.kind === 'deny') return denied('react', recipient, d, { reaction: a.reaction, message_id: a.message_id });
         if (d.kind === 'confirm') return confirmationRequired(`React with ${a.reaction || '(clear reaction)'} to message ${a.message_id} in ${label(recipient)}?`);
-        await deps.rateLimiter.record(deps.now());
         const argv = ['send', 'react', `--to=${recipient.jid}`, `--id=${a.message_id}`, `--reaction=${a.reaction}`];
         if (a.sender) argv.push(`--sender=${a.sender}`);
         const res = await deps.runner.write<WacliSendResult>(argv);
-        await deps.audit({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
+        await record({ ...base('react', recipient), outcome: 'sent', message_id: a.message_id, reaction: a.reaction });
         return ok({ sent: true, message_id: res.id, to: recipient });
       } catch (e) {
         return failed('react', recipient, e, { reaction: a.reaction, message_id: a.message_id });
@@ -3851,7 +4165,7 @@ export function registerWriteTools(server: McpServer, deps: ServerDeps): void {
         const d = await gate(ctx, 'mark_read', recipient);
         if (d.kind === 'deny') return denied('mark_read', recipient, d, {});
         await deps.runner.write<WacliChatStateResult>(['chats', 'mark-read', `--chat=${recipient.jid}`]);
-        await deps.audit({ ...base('mark_read', recipient), outcome: 'sent' });
+        await record({ ...base('mark_read', recipient), outcome: 'sent' });
         return ok({ ok: true, chat: recipient });
       } catch (e) {
         return failed('mark_read', recipient, e, {});
@@ -3872,7 +4186,7 @@ import { registerWriteTools } from './tools/send.js';
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/confirm.test.ts test/integration/write-tools.test.ts && pnpm typecheck`
-Expected: PASS (3 unit, 15 integration). If `server.server.getClientVersion` is reported as missing, replace the `client:` line in `base` with `client: undefined`; it is informational only. If `tools/list` fails with a schema conversion error mentioning `refine`, remove the two `.refine(...)` calls (`send_file.path`, `react.reaction`) and perform the same checks at the top of each handler, returning `toToolError(new AgentError('invalid_input', ...))`.
+Expected: PASS (3 unit, 18 integration). If `server.server.getClientVersion` is reported as missing, replace the `client:` line in `base` with `client: undefined`; it is informational only. If `tools/list` fails with a schema conversion error mentioning `refine`, remove the two `.refine(...)` calls (`send_file.path`, `react.reaction`) and perform the same checks at the top of each handler, returning `toToolError(new AgentError('invalid_input', ...))`.
 
 - [ ] **Step 7: Run the whole suite and commit**
 
@@ -4054,7 +4368,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Produces:
   - `interface ServiceStatus { installed: boolean; running: boolean | null; detail: string }`, `interface ServiceManager { install(): Promise<string>; uninstall(): Promise<void>; status(): Promise<ServiceStatus> }` (implemented in Task 16)
   - `interface DoctorReport { status: StatusInfo; wacli_bin: string; policy: PolicySummary; service: ServiceStatus | null; paths: { config_dir; data_dir; policy_file; audit_file; daemon_log }; problems: string[] }`, `collectDoctor(opts: { runner: Runner; policy: Policy; paths: Paths; service: ServiceManager | null; now: () => Date }): Promise<DoctorReport>`, `formatDoctor(r: DoctorReport): string`
-  - Policy edits (each loads, changes, saves, returns the new policy): `enableWrites(file)`, `disableWrites(file)`, `allowRecipient(file, entry)`, `removeRecipient(file, entry)`, `setConfirm(file, mode)`, `setGroups(file, on: boolean)`, `addFileRoot(file, dir)` (resolves to an absolute real path and requires an existing directory), `formatPolicy(p: Policy): string`
+  - Policy edits (each loads, changes, saves, returns the new policy): `enableWrites(file)`, `disableWrites(file)`, `allowRecipient(file, entry, resolver?)` (phone numbers stored as given, JIDs canonicalised, a name resolved once through the resolver and stored as its JID; names without a resolver and non-messageable kinds are `invalid_input`), `removeRecipient(file, entry)`, `setConfirm(file, mode)`, `setGroups(file, on: boolean)`, `addFileRoot(file, dir)` (expands a leading `~`, resolves to an absolute real path and requires an existing directory), `isInertEntry(entry): boolean`, `formatPolicy(p: Policy): string` (flags inert entries); `collectDoctor` lists inert allowlist entries as problems
   - `formatAudit(records: AuditRecord[]): string`
   - `claudeMcpAddCommand(): string`, `mcpConfigJson(): string`
   - commander builders `doctorCommand()`, `policyCommand()`, `auditCommand()`.
@@ -4064,17 +4378,21 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 `test/unit/policy-cmd.test.ts`:
 
 ```ts
-import { mkdir } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { addFileRoot, allowRecipient, disableWrites, enableWrites, formatPolicy, removeRecipient, setConfirm, setGroups } from '../../src/ops/policy-cmd.js';
-import { loadPolicy } from '../../src/policy/schema.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { addFileRoot, allowRecipient, disableWrites, enableWrites, formatPolicy, isInertEntry, removeRecipient, setConfirm, setGroups } from '../../src/ops/policy-cmd.js';
+import { DEFAULT_POLICY, loadPolicy, savePolicy } from '../../src/policy/schema.js';
+import type { Resolver } from '../../src/wacli/resolve.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 let tmp: string;
 let file: string;
 beforeEach(async () => { tmp = await makeTmp(); file = path.join(tmp, 'cfg', 'policy.json'); });
-afterEach(async () => { await removeTmp(tmp); });
+afterEach(async () => { await removeTmp(tmp); vi.unstubAllEnvs(); });
+
+const alice: Resolver = { resolve: async () => ({ jid: '61400000001@s.whatsapp.net', name: 'Alice', kind: 'user' }) };
+const channel: Resolver = { resolve: async () => ({ jid: '1@newsletter', name: 'News', kind: 'channel' }) };
 
 describe('policy edits', () => {
   it('enables and disables writes, persisting to disk', async () => {
@@ -4083,13 +4401,24 @@ describe('policy edits', () => {
     expect((await disableWrites(file)).writes.enabled).toBe(false);
   });
 
-  it('adds and removes allowlist entries without duplicates', async () => {
+  it('dedupes and removes by target, not by spelling, and refuses national numbers', async () => {
     await allowRecipient(file, '+61 400 000 001');
-    await allowRecipient(file, '+61 400 000 001');
-    await allowRecipient(file, 'Alice');
-    expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001', 'Alice']);
-    await removeRecipient(file, 'alice');
-    expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001']);
+    await allowRecipient(file, '+61400000001');
+    await allowRecipient(file, '+61400000002:3@s.whatsapp.net');
+    await allowRecipient(file, '61400000002@s.whatsapp.net');
+    expect((await loadPolicy(file)).writes.allow).toEqual(['+61 400 000 001', '61400000002@s.whatsapp.net']);
+    await removeRecipient(file, '61400000002:9@s.whatsapp.net');
+    await removeRecipient(file, '61400000001');
+    expect((await loadPolicy(file)).writes.allow).toEqual([]);
+    await expect(removeRecipient(file, 'nobody')).rejects.toMatchObject({ code: 'not_found' });
+    await expect(allowRecipient(file, '0400 000 001')).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  it('resolves a name to its JID once and refuses names without a resolver or unsendable kinds', async () => {
+    await allowRecipient(file, 'Alice', alice);
+    expect((await loadPolicy(file)).writes.allow).toEqual(['61400000001@s.whatsapp.net']);
+    await expect(allowRecipient(file, 'Bob')).rejects.toMatchObject({ code: 'invalid_input' });
+    await expect(allowRecipient(file, 'News', channel)).rejects.toMatchObject({ code: 'invalid_input' });
   });
 
   it('sets confirm mode and groups', async () => {
@@ -4097,19 +4426,24 @@ describe('policy edits', () => {
     expect((await setGroups(file, true)).writes.groups).toBe(true);
   });
 
-  it('adds an existing directory as a file root, resolved to an absolute path', async () => {
+  it('adds an existing directory as a file root, resolved to a real absolute path, expanding a leading tilde', async () => {
     const dir = path.join(tmp, 'outbox');
     await mkdir(dir);
-    const p = await addFileRoot(file, dir);
-    expect(p.writes.fileRoots).toHaveLength(1);
-    expect(path.isAbsolute(p.writes.fileRoots[0]!)).toBe(true);
+    vi.stubEnv('HOME', tmp);
+    const p = await addFileRoot(file, '~/outbox');
+    expect(p.writes.fileRoots).toEqual([await realpath(dir)]);
     await expect(addFileRoot(file, path.join(tmp, 'missing'))).rejects.toMatchObject({ code: 'invalid_input' });
   });
 
-  it('formats a readable summary', async () => {
-    const text = formatPolicy(await enableWrites(file));
+  it('formats a readable summary and flags inert allowlist entries', async () => {
+    await savePolicy(file, { ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, enabled: true, allow: ['+61 400 000 001', 'Alice'] } });
+    const text = formatPolicy(await loadPolicy(file));
     expect(text).toContain('writes: enabled');
     expect(text).toContain('confirm: always');
+    expect(text).toContain('Alice (inert: not a phone number or JID)');
+    expect(isInertEntry('+61 400 000 001')).toBe(false);
+    expect(isInertEntry('61400000001@S.WHATSAPP.NET')).toBe(false);
+    expect(isInertEntry('0400 000 001')).toBe(true);
   });
 });
 ```
@@ -4158,7 +4492,7 @@ describe('doctor', () => {
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { formatAudit } from '../../src/ops/audit-cmd.js';
+import { formatAudit, parseLimit, parseSince } from '../../src/ops/audit-cmd.js';
 import { claudeMcpAddCommand, mcpConfigJson } from '../../src/ops/mcp-config.js';
 
 describe('audit formatting', () => {
@@ -4173,6 +4507,15 @@ describe('audit formatting', () => {
   });
   it('says so when empty', () => {
     expect(formatAudit([])).toBe('No audit records.\n');
+  });
+});
+
+describe('audit option parsing', () => {
+  it('rejects non-positive or non-numeric limits and unparseable dates', () => {
+    expect(parseLimit('5')).toBe(5);
+    for (const bad of ['0', '-1', 'abc', '1.5']) expect(() => parseLimit(bad)).toThrowError(expect.objectContaining({ code: 'invalid_input' }));
+    expect(parseSince('2026-10-20').toISOString()).toBe('2026-10-20T00:00:00.000Z');
+    for (const bad of ['garbage', '7d']) expect(() => parseSince(bad)).toThrowError(expect.objectContaining({ code: 'invalid_input' }));
   });
 });
 
@@ -4233,6 +4576,7 @@ import { summarizePolicy, type PolicySummary } from '../policy/summary.js';
 import type { Runner } from '../wacli/runner.js';
 import { getStatus, type StatusInfo } from '../wacli/status.js';
 import { MIN_WACLI_VERSION } from '../version.js';
+import { isInertEntry } from './policy-cmd.js';
 import type { ServiceManager, ServiceStatus } from './service-types.js';
 
 export interface DoctorReport {
@@ -4265,6 +4609,9 @@ export async function collectDoctor(opts: { runner: Runner; policy: Policy; path
   }
   if (status.session_revoked) {
     problems.push('WhatsApp revoked the linked session. Run: whatsapp-agent setup');
+  }
+  for (const entry of opts.policy.writes.allow) {
+    if (isInertEntry(entry)) problems.push(`Allowlist entry "${entry}" is not a phone number or JID and never matches. Replace it with: whatsapp-agent policy allow <number or JID>`);
   }
   const service = opts.service ? await opts.service.status() : null;
   if (service && !service.installed) {
@@ -4314,11 +4661,15 @@ export function formatDoctor(r: DoctorReport): string {
 
 ```ts
 import { realpath, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
 import { AgentError } from '../errors.js';
 import { resolvePaths } from '../paths.js';
 import { loadPolicy, savePolicy, type ConfirmMode, type Policy } from '../policy/schema.js';
+import { sameAllowTarget } from '../policy/engine.js';
+import { canonicalJid, createResolver, digitsOf, JID_RE, looksLikePhone, type Resolver } from '../wacli/resolve.js';
+import { createRunner } from '../wacli/runner.js';
 
 async function edit(file: string, fn: (p: Policy) => Policy): Promise<Policy> {
   const next = fn(await loadPolicy(file));
@@ -4329,21 +4680,46 @@ async function edit(file: string, fn: (p: Policy) => Policy): Promise<Policy> {
 export const enableWrites = (file: string) => edit(file, (p) => ({ ...p, writes: { ...p.writes, enabled: true } }));
 export const disableWrites = (file: string) => edit(file, (p) => ({ ...p, writes: { ...p.writes, enabled: false } }));
 
-export const allowRecipient = (file: string, entry: string) => edit(file, (p) => {
+/** True when an allowlist entry is neither a phone number (international format) nor a JID, so it can never match (A18). */
+export function isInertEntry(entry: string): boolean {
   const e = entry.trim();
-  const exists = p.writes.allow.some((a) => a.toLowerCase() === e.toLowerCase());
-  return exists ? p : { ...p, writes: { ...p.writes, allow: [...p.writes.allow, e] } };
-});
+  return !(JID_RE.test(e.toLowerCase()) || (looksLikePhone(e) && !digitsOf(e).startsWith('0')));
+}
 
-export const removeRecipient = (file: string, entry: string) => edit(file, (p) => ({
-  ...p, writes: { ...p.writes, allow: p.writes.allow.filter((a) => a.toLowerCase() !== entry.trim().toLowerCase()) },
-}));
+/** Phone numbers are stored as given, JIDs canonicalised; a name is resolved once through wacli and stored as its JID. */
+export async function allowRecipient(file: string, entry: string, resolver?: Resolver): Promise<Policy> {
+  const e = entry.trim();
+  let stored: string;
+  if (JID_RE.test(e.toLowerCase())) {
+    stored = canonicalJid(e.toLowerCase());
+  } else if (looksLikePhone(e)) {
+    if (digitsOf(e).startsWith('0')) {
+      throw new AgentError('invalid_input', `"${e}" looks like a national number. Use the international format with the country code, for example +61 400 000 001.`);
+    }
+    stored = e;
+  } else {
+    if (!resolver) throw new AgentError('invalid_input', `"${e}" is not a phone number or JID. Names are looked up through wacli; pass the number or JID instead.`);
+    const r = await resolver.resolve(e);
+    if (r.kind !== 'user' && r.kind !== 'group') throw new AgentError('invalid_input', `"${e}" is a ${r.kind}, which cannot receive messages.`);
+    stored = canonicalJid(r.jid);
+  }
+  return edit(file, (p) => (p.writes.allow.some((a) => sameAllowTarget(a, stored))
+    ? p
+    : { ...p, writes: { ...p.writes, allow: [...p.writes.allow, stored] } }));
+}
+
+export const removeRecipient = (file: string, entry: string) => edit(file, (p) => {
+  const kept = p.writes.allow.filter((a) => !sameAllowTarget(a, entry));
+  if (kept.length === p.writes.allow.length) throw new AgentError('not_found', `"${entry.trim()}" is not on the allowlist.`);
+  return { ...p, writes: { ...p.writes, allow: kept } };
+});
 
 export const setConfirm = (file: string, mode: ConfirmMode) => edit(file, (p) => ({ ...p, writes: { ...p.writes, confirm: mode } }));
 export const setGroups = (file: string, on: boolean) => edit(file, (p) => ({ ...p, writes: { ...p.writes, groups: on } }));
 
 export async function addFileRoot(file: string, dir: string): Promise<Policy> {
-  const abs = path.resolve(dir);
+  const expanded = dir === '~' || dir.startsWith('~/') ? path.join(os.homedir(), dir.slice(1)) : dir;
+  const abs = path.resolve(expanded);
   let real: string;
   try {
     real = await realpath(abs);
@@ -4355,10 +4731,11 @@ export async function addFileRoot(file: string, dir: string): Promise<Policy> {
 }
 
 export function formatPolicy(p: Policy): string {
+  const allow = p.writes.allow.map((a) => (isInertEntry(a) ? `${a} (inert: not a phone number or JID)` : a));
   return [
     `writes: ${p.writes.enabled ? 'enabled' : 'disabled'}`,
     `confirm: ${p.writes.confirm}`,
-    `allowlist: ${p.writes.allow.length === 0 ? '(empty)' : p.writes.allow.join(', ')}`,
+    `allowlist: ${allow.length === 0 ? '(empty)' : allow.join(', ')}`,
     `groups: ${p.writes.groups ? 'on' : 'off'}`,
     `rate limit: ${p.writes.rateLimit.perHour} per hour, ${p.writes.rateLimit.minGapSeconds}s minimum gap`,
     `file roots: ${p.writes.fileRoots.length === 0 ? '(none; send_file is off)' : p.writes.fileRoots.join(', ')}`,
@@ -4373,7 +4750,11 @@ export function policyCommand(): Command {
   cmd.command('show').description('Print the current policy').action(async () => out(await loadPolicy(file())));
   cmd.command('enable').description('Allow write tools (sends still follow confirm, allowlist and rate limit)').action(async () => out(await enableWrites(file())));
   cmd.command('disable').description('Turn all write tools off').action(async () => out(await disableWrites(file())));
-  cmd.command('allow <recipient>').description('Add a phone number, JID or exact chat name to the allowlist').action(async (r: string) => out(await allowRecipient(file(), r)));
+  cmd.command('allow <recipient>').description('Add a phone number or JID to the allowlist; a name is looked up once and stored as its JID').action(async (r: string) => {
+    const policy = await loadPolicy(file());
+    const resolver = createResolver(createRunner({ bin: process.env.WHATSAPP_AGENT_WACLI_BIN || 'wacli', account: policy.account, baseEnv: process.env }));
+    out(await allowRecipient(file(), r, resolver));
+  });
   cmd.command('remove <recipient>').description('Remove an allowlist entry').action(async (r: string) => out(await removeRecipient(file(), r)));
   const set = cmd.command('set').description('Change a setting');
   set.command('confirm <mode>').description('always | unlisted | never').action(async (mode: string) => {
@@ -4393,6 +4774,7 @@ export function policyCommand(): Command {
 
 ```ts
 import { Command } from 'commander';
+import { AgentError } from '../errors.js';
 import { resolvePaths } from '../paths.js';
 import { readAudit, type AuditRecord } from '../policy/audit.js';
 
@@ -4411,17 +4793,28 @@ export function formatAudit(records: AuditRecord[]): string {
   return lines.join('\n') + '\n';
 }
 
+export function parseLimit(raw: string): number {
+  if (!/^[1-9]\d*$/.test(raw)) throw new AgentError('invalid_input', '--limit must be a positive whole number');
+  return Number(raw);
+}
+
+export function parseSince(raw: string): Date {
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) throw new AgentError('invalid_input', '--since must be YYYY-MM-DD (UTC midnight) or an RFC 3339 timestamp');
+  return d;
+}
+
 export function auditCommand(): Command {
   return new Command('audit')
     .description('Show what the agent sent or tried to send')
-    .option('-n, --limit <n>', 'number of records', '50')
-    .option('--since <date>', 'only records at or after this time (YYYY-MM-DD or RFC 3339)')
+    .option('-n, --limit <n>', 'number of records (a positive whole number)', '50')
+    .option('--since <date>', 'only records at or after this time (YYYY-MM-DD is UTC midnight, or RFC 3339)')
     .option('--tool <name>', 'filter by tool name')
     .option('--json', 'print JSON lines')
     .action(async (opts: { limit: string; since?: string; tool?: string; json?: boolean }) => {
       const records = await readAudit(resolvePaths().auditFile, {
-        limit: Number(opts.limit) || 50,
-        since: opts.since ? new Date(opts.since) : undefined,
+        limit: parseLimit(opts.limit),
+        since: opts.since ? parseSince(opts.since) : undefined,
         tool: opts.tool,
       });
       process.stdout.write(opts.json ? records.map((r) => JSON.stringify(r)).join('\n') + (records.length ? '\n' : '') : formatAudit(records));
@@ -4476,7 +4869,7 @@ program.addCommand(auditCommand());
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/policy-cmd.test.ts test/unit/doctor.test.ts test/unit/audit-cmd.test.ts && pnpm typecheck && pnpm build && node bin/whatsapp-agent.mjs policy show`
-Expected: PASS (10 tests); `policy show` prints `writes: disabled` and the other lines from the defaults.
+Expected: PASS (12 tests); `policy show` prints `writes: disabled` and the other lines from the defaults.
 
 - [ ] **Step 5: Commit**
 
@@ -4512,7 +4905,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```ts
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildSyncArgs, parseEventLine, startSupervisor } from '../../src/ops/daemon.js';
+import { buildSyncArgs, describeStderrLine, parseEventLine, startSupervisor } from '../../src/ops/daemon.js';
 import { DEFAULT_POLICY } from '../../src/policy/schema.js';
 import { FAKE_WACLI, fakeEnv, makeTmp, removeTmp } from '../helpers/fake.js';
 
@@ -4540,7 +4933,7 @@ describe('parseEventLine', () => {
 });
 
 describe('startSupervisor', () => {
-  function start(script: string, over: { sleeps?: number[] } = {}) {
+  function start(script: string, over: { sleeps?: number[]; sleep?: (ms: number) => Promise<void> } = {}) {
     const lines: string[] = [];
     const sleeps: number[] = over.sleeps ?? [];
     const handle = startSupervisor({
@@ -4550,7 +4943,7 @@ describe('startSupervisor', () => {
       env: fakeEnv({ FAKE_WACLI_SYNC: script, FAKE_WACLI_SYNC_COUNTER: path.join(tmp, 'counter') }),
       log: (l) => lines.push(l),
       backoff: { initialMs: 50, maxMs: 200, resetAfterMs: 60_000 },
-      sleep: async (ms) => { sleeps.push(ms); },
+      sleep: over.sleep ?? (async (ms) => { sleeps.push(ms); }),
     });
     return { handle, lines, sleeps };
   }
@@ -4564,12 +4957,19 @@ describe('startSupervisor', () => {
   });
 
   it('crash restarts with backoff, doubling to the cap, then stop() ends it', async () => {
-    const { handle, sleeps, lines } = start('connected;crash|crash|crash|connected;sleep:30000');
-    await new Promise((r) => setTimeout(r, 2500));
-    expect(sleeps).toEqual([50, 100, 200]);
+    const { handle, sleeps, lines } = start('connected;crash|crash|crash|crash|connected;sleep:30000');
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(sleeps).toEqual([50, 100, 200, 200]);
     await handle.stop();
     await expect(handle.done).resolves.toBe('stopped');
     expect(lines.some((l) => l.includes('restarting in 50 ms'))).toBe(true);
+  });
+
+  it('stop() interrupts a backoff sleep', async () => {
+    const { handle } = start('crash', { sleep: () => new Promise(() => {}) });
+    await new Promise((r) => setTimeout(r, 400));
+    await handle.stop();
+    await expect(handle.done).resolves.toBe('stopped');
   });
 
   it('forwards non-JSON stderr lines to the log', async () => {
@@ -4578,6 +4978,17 @@ describe('startSupervisor', () => {
     await handle.stop();
     await handle.done;
     expect(lines.some((l) => l.endsWith('connected; history sync 12%'))).toBe(true);
+  });
+});
+
+describe('describeStderrLine', () => {
+  it('logs event names only, redacts other json, strips control characters and caps length', () => {
+    expect(describeStderrLine('{"event":"connected","data":{"Text":"secret"},"ts":1}')).toEqual({ text: 'event=connected', event: 'connected' });
+    expect(describeStderrLine('{"event":"bad\\nname","ts":1}')).toEqual({ text: 'event=(unrecognised name)', event: null });
+    expect(describeStderrLine('{"type":"message","Text":"secret"}').text).toBe('(unrecognised json line, 34 chars)');
+    expect(describeStderrLine('warn \u001b[31mred\u001b[0m').text).toBe('warn [31mred[0m');
+    expect(describeStderrLine('x'.repeat(600)).text).toBe(`${'x'.repeat(500)}... (600 chars)`);
+    expect(describeStderrLine('   ').text).toBeNull();
   });
 });
 ```
@@ -4622,6 +5033,26 @@ export function parseEventLine(line: string): { event: string; data?: unknown } 
   }
 }
 
+const EVENT_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+const MAX_PLAIN_LINE = 500;
+
+function safeLine(line: string): string {
+  const stripped = line.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e]/g, '');
+  return stripped.length > MAX_PLAIN_LINE ? `${stripped.slice(0, MAX_PLAIN_LINE)}... (${stripped.length} chars)` : stripped;
+}
+
+/** What one stderr line contributes to the log: never a message body, never an unbounded line. */
+export function describeStderrLine(line: string): { text: string | null; event: string | null } {
+  const ev = parseEventLine(line);
+  if (ev) {
+    return EVENT_NAME.test(ev.event) ? { text: `event=${ev.event}`, event: ev.event } : { text: 'event=(unrecognised name)', event: null };
+  }
+  const t = line.trim();
+  if (t === '') return { text: null, event: null };
+  if (t.startsWith('{')) return { text: `(unrecognised json line, ${line.length} chars)`, event: null };
+  return { text: safeLine(line), event: null };
+}
+
 export interface SupervisorOptions {
   bin: string;
   account: string | null;
@@ -4650,6 +5081,8 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
   let child: ChildProcess | null = null;
   let stopping = false;
   let delay = backoff.initialMs;
+  let requestStop: () => void = () => {};
+  const stopRequested = new Promise<void>((resolve) => { requestStop = resolve; });
 
   const runOnce = (): Promise<{ code: number | null; loggedOut: boolean; startedAt: number }> =>
     new Promise((resolve) => {
@@ -4659,13 +5092,9 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
       child = spawn(opts.bin, args, { env: { ...(opts.env ?? process.env), NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
       const rl = readline.createInterface({ input: child.stderr! });
       rl.on('line', (line) => {
-        const ev = parseEventLine(line);
-        if (ev) {
-          if (ev.event === 'logged_out') loggedOut = true;
-          opts.log(`${stamp()} event=${ev.event}`);
-        } else if (line.trim() !== '') {
-          opts.log(`${stamp()} ${line}`);
-        }
+        const d = describeStderrLine(line);
+        if (d.event === 'logged_out') loggedOut = true;
+        if (d.text !== null) opts.log(`${stamp()} ${d.text}`);
       });
       child.stdout?.on('data', () => { /* sync prints nothing useful on stdout */ });
       child.on('error', (err) => opts.log(`${stamp()} spawn error: ${err.message}`));
@@ -4682,7 +5111,7 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
       }
       if (now() - r.startedAt >= backoff.resetAfterMs) delay = backoff.initialMs;
       opts.log(`${stamp()} sync exited with code ${r.code ?? 'signal'}; restarting in ${delay} ms`);
-      await sleep(delay);
+      await Promise.race([sleep(delay), stopRequested]);
       delay = Math.min(delay * 2, backoff.maxMs);
       if (stopping) return 'stopped';
     }
@@ -4692,6 +5121,8 @@ export function startSupervisor(opts: SupervisorOptions): SupervisorHandle {
     done,
     async stop() {
       stopping = true;
+      requestStop();
+      opts.log(`${stamp()} stop requested`);
       const c = child;
       if (c && c.exitCode === null) {
         c.kill('SIGTERM');
@@ -4744,7 +5175,7 @@ program.addCommand(daemonCommand());
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/daemon.test.ts && pnpm typecheck`
-Expected: PASS (6 tests). The restart test waits 2.5 s.
+Expected: PASS (7 tests). The restart test waits 3 s.
 
 - [ ] **Step 5: Commit**
 
@@ -4780,11 +5211,12 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 `test/unit/service.test.ts`:
 
 ```ts
-import { writeFile } from 'node:fs/promises';
+import { appendFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createServiceManager, isGlobalInstall, launchdPlist, launchdPlistPath, systemdUnit, systemdUnitPath, type ServicePaths } from '../../src/ops/service.js';
-import { tailFile } from '../../src/ops/tail.js';
+import { createServiceManager, isGlobalInstall, launchdPlist, launchdPlistPath, servicePathsForThisMachine, systemdUnit, systemdUnitPath, type ServicePaths } from '../../src/ops/service.js';
+import { followFile, tailFile } from '../../src/ops/tail.js';
+import { resolvePaths } from '../../src/paths.js';
 import { makeTmp, removeTmp } from '../helpers/fake.js';
 
 const sp: ServicePaths = {
@@ -4799,6 +5231,10 @@ describe('isGlobalInstall', () => {
     expect(isGlobalInstall('/Users/u/.cache/dlx-9f8e/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
     expect(isGlobalInstall('/Users/u/Developer/whatsapp-agent/dist/cli.js', {})).toBe(false);
     expect(isGlobalInstall('/Users/u/Developer/whatsapp-agent/dist/cli.js', { WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE: '1' })).toBe(true);
+    expect(isGlobalInstall('/Users/u/Library/Caches/pnpm/dlx/abc123/1700000000-1/node_modules/.pnpm/whatsapp-agent@0.1.0/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
+    expect(isGlobalInstall('/home/u/.cache/pnpm/dlx/abc123/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
+    expect(isGlobalInstall('/private/tmp/bunx-501-whatsapp-agent@latest/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(false);
+    expect(isGlobalInstall('/Users/u/Library/pnpm/global/5/node_modules/whatsapp-agent/dist/cli.js', {})).toBe(true);
   });
 });
 
@@ -4811,14 +5247,24 @@ describe('templates', () => {
     expect(plist).toContain('<key>WHATSAPP_AGENT_WACLI_BIN</key><string>/opt/homebrew/bin/wacli</string>');
     expect(plist).toContain('<string>/a&amp;b</string>');
     expect(plist).toContain('<key>StandardOutPath</key><string>/home/u/.local/share/whatsapp-agent/daemon.log</string>');
+    expect(plist).toContain('<key>SuccessfulExit</key><false/>');
+    expect(plist).not.toContain('<key>KeepAlive</key><true/>');
     expect(launchdPlistPath('/home/u')).toBe('/home/u/Library/LaunchAgents/com.whatsapp-agent.daemon.plist');
   });
   it('renders a systemd unit', () => {
     const unit = systemdUnit(sp);
     expect(unit).toContain('ExecStart=/usr/local/bin/node /usr/local/lib/node_modules/whatsapp-agent/dist/cli.js daemon run');
     expect(unit).toContain('Environment=WHATSAPP_AGENT_WACLI_BIN=/opt/homebrew/bin/wacli');
-    expect(unit).toContain('Restart=always');
+    expect(unit).toContain('Restart=on-failure');
     expect(systemdUnitPath('/home/u')).toBe('/home/u/.config/systemd/user/whatsapp-agent.service');
+  });
+
+  it('servicePathsForThisMachine pins the resolved config and data dirs into the service environment', () => {
+    const paths = resolvePaths({ XDG_CONFIG_HOME: '/mnt/cfg', XDG_DATA_HOME: '/mnt/data' }, '/home/u');
+    const sp = servicePathsForThisMachine(paths, { WHATSAPP_AGENT_WACLI_BIN: '/opt/wacli' });
+    expect(sp.env).toEqual({ WHATSAPP_AGENT_CONFIG_DIR: '/mnt/cfg/whatsapp-agent', WHATSAPP_AGENT_DATA_DIR: '/mnt/data/whatsapp-agent' });
+    expect(sp.wacliBin).toBe('/opt/wacli');
+    expect(sp.dataDir).toBe('/mnt/data/whatsapp-agent');
   });
 });
 
@@ -4893,6 +5339,18 @@ describe('tailFile', () => {
     expect(await tailFile(f, 10)).toBe('a\nb\nc\nd\n');
     expect(await tailFile(path.join(tmp, 'missing'), 3)).toBe('');
   });
+
+  it('followFile prints only bytes appended after it starts, intact after multi-byte text', async () => {
+    const f = path.join(tmp, 'log');
+    await writeFile(f, 'old line \u2713\n');
+    const chunks: string[] = [];
+    const stop = followFile(f, (c) => chunks.push(c), 20);
+    await new Promise((r) => setTimeout(r, 60));
+    await appendFile(f, 'NEWLINE-ONE\n');
+    await new Promise((r) => setTimeout(r, 80));
+    stop();
+    expect(chunks.join('')).toBe('NEWLINE-ONE\n');
+  });
 });
 ```
 
@@ -4937,7 +5395,7 @@ export function platformOf(p: NodeJS.Platform = process.platform): Platform {
 export function isGlobalInstall(cliPath: string, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE === '1') return true;
   const p = cliPath.split(path.sep).join('/');
-  if (/\/(_npx|dlx-[^/]+|\.pnpm-store|\.cache)\//.test(p)) return false;
+  if (/\/(_npx|dlx(-[^/]+)?|\.pnpm-store|\.cache|Caches|bunx-[^/]+)\//.test(p)) return false;
   return /\/node_modules\/whatsapp-agent\//.test(p);
 }
 
@@ -4971,7 +5429,10 @@ export function launchdPlist(p: ServicePaths): string {
     '    <string>run</string>',
     '  </array>',
     '  <key>RunAtLoad</key><true/>',
-    '  <key>KeepAlive</key><true/>',
+    '  <key>KeepAlive</key>',
+    '  <dict>',
+    '    <key>SuccessfulExit</key><false/>',
+    '  </dict>',
     '  <key>ProcessType</key><string>Background</string>',
     `  <key>StandardOutPath</key><string>${xml(log)}</string>`,
     `  <key>StandardErrorPath</key><string>${xml(log)}</string>`,
@@ -4995,7 +5456,7 @@ export function systemdUnit(p: ServicePaths): string {
     '',
     '[Service]',
     `ExecStart=${p.nodePath} ${p.cliPath} daemon run`,
-    'Restart=always',
+    'Restart=on-failure',
     'RestartSec=5',
     envLines,
     `StandardOutput=append:${log}`,
@@ -5094,9 +5555,8 @@ export const realFs: ServiceFs = {
 };
 
 export function servicePathsForThisMachine(paths: Paths, env: NodeJS.ProcessEnv = process.env): ServicePaths {
-  const extra: Record<string, string> = {};
-  if (env.WHATSAPP_AGENT_CONFIG_DIR) extra.WHATSAPP_AGENT_CONFIG_DIR = env.WHATSAPP_AGENT_CONFIG_DIR;
-  if (env.WHATSAPP_AGENT_DATA_DIR) extra.WHATSAPP_AGENT_DATA_DIR = env.WHATSAPP_AGENT_DATA_DIR;
+  /** Always pinned: a login service does not inherit the installer's shell (XDG variables included). */
+  const extra: Record<string, string> = { WHATSAPP_AGENT_CONFIG_DIR: paths.configDir, WHATSAPP_AGENT_DATA_DIR: paths.dataDir };
   return {
     nodePath: process.execPath,
     cliPath: fileURLToPath(new URL('../cli.js', import.meta.url)),
@@ -5131,22 +5591,24 @@ export async function tailFile(file: string, lines: number): Promise<string> {
   return all.slice(Math.max(0, all.length - lines)).map((l) => l + '\n').join('');
 }
 
-/** Print appended bytes every second until the returned function is called. */
-export function followFile(file: string, write: (chunk: string) => void): () => void {
-  let offset = 0;
-  const timer = setInterval(async () => {
+/** Print bytes appended after the call, polling every `intervalMs`, until the returned function is called. */
+export function followFile(file: string, write: (chunk: string) => void, intervalMs = 1000): () => void {
+  let offset = -1;
+  const poll = async (): Promise<void> => {
     try {
       const size = (await stat(file)).size;
-      if (size < offset) offset = 0;
+      if (offset < 0 || size < offset) offset = size;
       if (size > offset) {
-        const text = await readFile(file, 'utf8');
-        write(text.slice(offset));
+        const bytes = await readFile(file);
+        write(bytes.subarray(offset, size).toString('utf8'));
         offset = size;
       }
     } catch {
       // file may not exist yet
     }
-  }, 1000);
+  };
+  void poll();
+  const timer = setInterval(() => { void poll(); }, intervalMs);
   return () => clearInterval(timer);
 }
 ```
@@ -5156,7 +5618,7 @@ Replace `src/ops/daemon-cmd.ts` with:
 ```ts
 import { Command } from 'commander';
 import { AgentError } from '../errors.js';
-import { resolvePaths } from '../paths.js';
+import { ensureDirs, resolvePaths } from '../paths.js';
 import { loadPolicy } from '../policy/schema.js';
 import { startSupervisor } from './daemon.js';
 import { isGlobalInstall, serviceManagerForThisMachine, servicePathsForThisMachine } from './service.js';
@@ -5183,6 +5645,7 @@ export function daemonCommand(): Command {
 
   cmd.command('install').description('Install the sync daemon as a login service (launchd or systemd)').action(async () => {
     const paths = resolvePaths();
+    await ensureDirs(paths);
     const sp = servicePathsForThisMachine(paths);
     if (!isGlobalInstall(sp.cliPath)) {
       throw new AgentError('invalid_input', 'daemon install needs a global install so the service has a stable path. Run: npm i -g whatsapp-agent, then: whatsapp-agent daemon install');
@@ -5206,7 +5669,7 @@ export function daemonCommand(): Command {
     const manager = serviceManagerForThisMachine(paths);
     const s = manager ? await manager.status() : { installed: false, running: null, detail: 'not supported on this platform' };
     process.stdout.write(`${s.detail}\n`);
-    if (manager && !s.running) process.exitCode = 1;
+    if (!manager || !s.running) process.exitCode = 1;
   });
 
   cmd.command('logs').description('Show the daemon log').option('-n, --lines <n>', 'lines to show', '100').option('-f, --follow', 'keep printing new lines').action(async (opts: { lines: string; follow?: boolean }) => {
@@ -5225,7 +5688,7 @@ export function daemonCommand(): Command {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run test/unit/service.test.ts && pnpm typecheck && pnpm build && node bin/whatsapp-agent.mjs daemon status`
-Expected: PASS (10 tests); `daemon status` prints `not installed` and exits 1.
+Expected: PASS (11 tests); `daemon status` prints `not installed` and exits 1.
 
 - [ ] **Step 5: Commit**
 
@@ -5609,7 +6072,7 @@ wacli and this tool use the WhatsApp Web protocol through an unofficial client. 
    { "mcpServers": { "whatsapp": { "command": "npx", "args": ["-y", "whatsapp-agent", "mcp"] } } }
    ```
 
-Requires Node 22 or newer and wacli 0.22.0 or newer.
+Requires Node 22.12 or newer and wacli 0.22.0 or newer.
 
 ## What the agent can do
 
@@ -5651,9 +6114,11 @@ whatsapp-agent policy disable
 
 - `confirm always` (default): the agent's host shows you the recipient and the exact text, and nothing is sent until you tick confirm. Hosts that cannot show a form get a clear refusal instead.
 - `confirm unlisted`: allowlisted recipients send without a prompt; everyone else prompts.
-- `confirm never`: no prompts. Only sensible with a tight allowlist.
+- `confirm never`: no prompts at all. The allowlist is not consulted in this mode.
+- Allowlist entries are phone numbers or JIDs. `policy allow <name>` looks the name up once and stores the JID. Display names are never matched, because other people choose them.
 - Groups are refused until `set groups on`.
 - `send_file` is off until you add a folder.
+- Validation errors for malformed tool input come back from the MCP SDK as plain text; only tool-level errors carry the `{"error", "message"}` JSON shape.
 - Rate limit: 20 sends an hour and 5 seconds between sends by default.
 
 Changes take effect on the next tool call; no restart needed.
@@ -5805,6 +6270,10 @@ jobs:
           generate_release_notes: true
 ```
 
+- [ ] **Step 3b: Harden the CI workflow and align the Node types floor**
+
+In `.github/workflows/ci.yml` add `permissions:\n  contents: read` at the top level (after `on:`), and `fail-fast: false` under `strategy:` so one failing Node leg does not cancel the others. In `package.json` change `@types/node` to `"^22.20.5"` and run `pnpm install` so the lockfile follows; typecheck must stay clean (the code uses no Node 24-only APIs).
+
 - [ ] **Step 4: Write the opt-in smoke test**
 
 `test/smoke/real-wacli.test.ts`:
@@ -5848,7 +6317,7 @@ Expected: the tarball listing contains `bin/whatsapp-agent.mjs`, `dist/cli.js`, 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add README.md SKILL.md CHANGELOG.md .github/workflows/release.yml test/smoke
+git add README.md SKILL.md CHANGELOG.md .github/workflows/ci.yml .github/workflows/release.yml package.json pnpm-lock.yaml test/smoke
 git commit -m "docs: add README, agent skill, changelog, release workflow and smoke test
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
@@ -5896,6 +6365,7 @@ Then in Claude Code:
 6. Send twice within five seconds. Expect `rate_limited` with `retry_after_seconds`.
 7. `whatsapp-agent audit` shows the sent, declined and rate-limited attempts.
 8. `whatsapp-agent daemon status` shows running; `whatsapp-agent daemon logs` shows `event=connected`.
+9. Remove the linked device from the phone, run `whatsapp-agent setup` again, and confirm it clears the old session and shows a new QR code.
 
 Record any failure as an issue, fix it in a new task, and repeat the failing step.
 

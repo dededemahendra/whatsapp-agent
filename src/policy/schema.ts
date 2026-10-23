@@ -1,0 +1,114 @@
+import { chmod, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import * as z from 'zod/v4';
+import { AgentError } from '../errors.js';
+import { ensurePrivateDir } from '../paths.js';
+
+/** How long wacli lets the connection go quiet before it reconnects, kept short so a dead link is noticed: up to 120 seconds, or exactly 1m or 2m. */
+function isStaleThreshold(value: string): boolean {
+  if (/^[12]m$/.test(value)) return true;
+  return /^\d+s$/.test(value) && Number(value.slice(0, -1)) <= 120;
+}
+
+export const PolicySchema = z.strictObject({
+  version: z.literal(1),
+  account: z.string().min(1).nullable(),
+  writes: z.strictObject({
+    enabled: z.boolean(),
+    confirm: z.enum(['always', 'unlisted', 'never']),
+    allow: z.array(z.string().min(1)).max(500),
+    groups: z.boolean(),
+    rateLimit: z.strictObject({
+      perHour: z.int().min(1).max(1000),
+      minGapSeconds: z.int().min(0).max(3600),
+    }),
+    fileRoots: z.array(z.string().min(1).refine((p) => path.isAbsolute(p), 'must be an absolute path')).max(50),
+  }),
+  limits: z.strictObject({
+    maxResults: z.int().min(1).max(200),
+    maxQueryChars: z.int().min(10).max(1000),
+    maxMessageChars: z.int().min(1).max(4096),
+  }),
+  media: z.strictObject({
+    inlineImageMaxBytes: z.int().min(0).max(10_000_000),
+  }),
+  daemon: z.strictObject({
+    presenceMode: z.enum(['quiet', 'normal']),
+    sendSpacing: z.string().regex(/^\d+(ms|s|m)(-\d+(ms|s|m))?$/),
+    staleThreshold: z.string().refine(isStaleThreshold, 'must be at most 2 minutes: a number of seconds up to 120 (for example 90s), or 1m or 2m'),
+    maxDbSize: z.string().regex(/^\d+(MB|GB)$/),
+    downloadMedia: z.boolean(),
+  }),
+});
+
+export type Policy = z.infer<typeof PolicySchema>;
+export type ConfirmMode = Policy['writes']['confirm'];
+
+export const DEFAULT_POLICY: Policy = {
+  version: 1,
+  account: null,
+  writes: {
+    enabled: false,
+    confirm: 'always',
+    allow: [],
+    groups: false,
+    rateLimit: { perHour: 20, minGapSeconds: 5 },
+    fileRoots: [],
+  },
+  limits: { maxResults: 50, maxQueryChars: 200, maxMessageChars: 4000 },
+  media: { inlineImageMaxBytes: 1_500_000 },
+  daemon: {
+    presenceMode: 'quiet',
+    sendSpacing: '2s-6s',
+    staleThreshold: '2m',
+    maxDbSize: '2GB',
+    downloadMedia: false,
+  },
+};
+
+function describeIssues(error: z.ZodError): string {
+  return error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+}
+
+/** Ends every message about a policy file that cannot be used, so a person at a terminal, or an agent passing the message on, knows where to look. */
+export const POLICY_HINT = 'Run whatsapp-agent doctor.';
+
+export async function loadPolicy(file: string): Promise<Policy> {
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return structuredClone(DEFAULT_POLICY);
+    throw new AgentError('invalid_input', `${file} could not be read${code ? ` (${code})` : ''}. ${POLICY_HINT}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new AgentError('invalid_input', `${file} is not valid JSON. ${POLICY_HINT}`);
+  }
+  const result = PolicySchema.safeParse(parsed);
+  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error).replace(/[\s.]+$/, '')}. ${POLICY_HINT}`);
+  return result.data;
+}
+
+let saveSeq = 0;
+
+/** Writes through a temp file named for this process and call, so two saves never share one, and removes it if the rename fails. */
+export async function savePolicy(file: string, policy: Policy): Promise<void> {
+  const result = PolicySchema.safeParse(policy);
+  if (!result.success) throw new AgentError('invalid_input', `${file} is invalid: ${describeIssues(result.error)}`);
+  const data = result.data;
+  await ensurePrivateDir(path.dirname(file));
+  saveSeq += 1;
+  const tmp = `${file}.${process.pid}.${saveSeq}.tmp`;
+  try {
+    await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+    await chmod(tmp, 0o600);
+    await rename(tmp, file);
+  } catch (e) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw e;
+  }
+}

@@ -1,0 +1,216 @@
+import { mkdir, stat, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { doctorCommand } from '../../src/ops/doctor-cmd.js';
+import { collectDoctor, formatDoctor } from '../../src/ops/doctor.js';
+import { claudeMcpAddCommand } from '../../src/ops/mcp-config.js';
+import { resolvePaths } from '../../src/paths.js';
+import { DEFAULT_POLICY } from '../../src/policy/schema.js';
+import { createRunner } from '../../src/wacli/runner.js';
+import { FAKE_WACLI, FIXTURES, fakeEnv, fixturesWith, makeTmp, removeTmp } from '../helpers/fake.js';
+
+let tmp: string;
+beforeEach(async () => { tmp = await makeTmp(); });
+afterEach(async () => { await removeTmp(tmp); vi.unstubAllEnvs(); });
+
+describe('doctor', () => {
+  it('collects status, policy, service and paths, and lists problems', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+    const service = { install: async () => '', uninstall: async () => {}, status: async () => ({ installed: false, running: null, detail: 'not installed' }) };
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service, now: () => new Date('2026-10-20T10:00:00Z') });
+    expect(r.status.authenticated).toBe(true);
+    expect(r.service).toEqual({ installed: false, running: null, detail: 'not installed' });
+    expect(r.problems).toEqual([]);
+    expect(r.warnings).toEqual(['The sync daemon is not installed. Reads will go stale. Run: whatsapp-agent daemon install']);
+    const text = formatDoctor(r);
+    expect(text).toContain('wacli: 0.22.0');
+    expect(text).toContain('paired: yes (+61400000000)');
+    expect(text).toContain('writes: disabled');
+    expect(text).toContain('last activity: none');
+    expect(text).not.toMatch(/heartbeat/i);
+    expect(text).toContain('connection: locked by another process');
+    expect(text).not.toContain('in use by the daemon');
+    expect(text).toContain(`data dir: ${paths.dataDir}`);
+    expect(text).toContain(`host command: ${claudeMcpAddCommand(paths)}`);
+    expect(text).toContain('No problems found.');
+    expect(text).toContain('Warnings:\n  - The sync daemon is not installed.');
+    expect(r.host_command).toBe(claudeMcpAddCommand(paths));
+  });
+
+  describe('a store that wacli reports as locked by another process', () => {
+    const labelled = async (service: { installed: boolean; running: boolean | null; detail: string } | null): Promise<string> => {
+      const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+      const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+      const manager = service && { install: async () => '', uninstall: async () => {}, status: async () => service };
+      const text = formatDoctor(await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: manager, now: () => new Date() }));
+      return text.split('\n').find((l) => l.startsWith('connection:'))!;
+    };
+
+    it('is called the daemon, and expected, only when the service says it is running', async () => {
+      expect(await labelled({ installed: true, running: true, detail: 'installed, running' })).toBe('connection: in use by the daemon (expected)');
+    });
+
+    it.each([
+      ['a service that is installed but stopped', { installed: true, running: false, detail: 'installed, inactive' }],
+      ['a service whose state is not known', { installed: true, running: null, detail: 'installed' }],
+      ['a service that is not installed', { installed: false, running: null, detail: 'not installed' }],
+      ['a platform with no service support', null],
+    ])('is simply locked by another process with %s', async (_what, service) => {
+      expect(await labelled(service)).toBe('connection: locked by another process');
+    });
+  });
+
+  it('labels only the store lock as the daemon, and shows other connection states as they are', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const dir = await fixturesWith({ 'doctor.json': '{"success":true,"data":{"store_dir":"__STORE_DIR__","lock_held":false,"authenticated":true,"session_revoked":false,"connected":true,"connection_state":"connected","fts_enabled":true},"error":null}\n' });
+    try {
+      const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_FIXTURES: dir, FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+      const running = { install: async () => '', uninstall: async () => {}, status: async () => ({ installed: true, running: true, detail: 'installed, running' }) };
+      for (const service of [null, running]) {
+        const text = formatDoctor(await collectDoctor({ runner, policyFile: paths.policyFile, paths, service, now: () => new Date() }));
+        expect(text).toContain('connection: connected');
+        expect(text).not.toContain('in use by the daemon');
+        expect(text).not.toContain('locked by another process');
+      }
+    } finally {
+      await removeTmp(dir);
+    }
+  });
+
+  it('keeps the exit code at 0 when only the daemon is missing, and at 1 for a problem', async () => {
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const before = process.exitCode;
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    vi.stubEnv('WHATSAPP_AGENT_CONFIG_DIR', paths.configDir);
+    vi.stubEnv('WHATSAPP_AGENT_DATA_DIR', paths.dataDir);
+    vi.stubEnv('WHATSAPP_AGENT_WACLI_BIN', FAKE_WACLI);
+    vi.stubEnv('FAKE_WACLI_FIXTURES', FIXTURES);
+    vi.stubEnv('FAKE_WACLI_STORE_DIR', path.join(tmp, 'store'));
+    const stopped = { install: async () => '', uninstall: async () => {}, status: async () => ({ installed: true, running: false, detail: 'installed, inactive' }) };
+    try {
+      process.exitCode = undefined;
+      await doctorCommand({ service: () => stopped }).parseAsync([], { from: 'user' });
+      expect(process.exitCode).toBeUndefined();
+      expect(out.mock.calls.map((c) => String(c[0])).join('')).toContain('Warnings:\n  - The sync daemon is installed but not running. Restart it with: whatsapp-agent daemon install');
+      vi.stubEnv('FAKE_WACLI_FAIL', 'doctor|1|not authenticated; run `wacli auth`');
+      await doctorCommand({ service: () => stopped }).parseAsync([], { from: 'user' });
+      expect(process.exitCode).toBe(1);
+    } finally {
+      out.mockRestore();
+      process.exitCode = before;
+    }
+  });
+
+  it('labels the heartbeat file last activity and shows its age', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const store = path.join(tmp, 'store');
+    await mkdir(store, { recursive: true });
+    await writeFile(path.join(store, 'HEARTBEAT'), '2026-10-20T10:00:00Z\n');
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: store }) });
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date('2026-10-20T10:00:30Z') });
+    expect(formatDoctor(r)).toContain('last activity: 2026-10-20T10:00:00.000Z (30s ago)');
+  });
+
+  it('reports a missing wacli as a problem', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const runner = createRunner({ bin: path.join(tmp, 'nope'), baseEnv: fakeEnv() });
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date() });
+    expect(r.status.wacli_version).toBeNull();
+    expect(r.problems[0]).toContain('wacli was not found');
+  });
+});
+
+describe('doctor with a wacli older than the minimum', () => {
+  it('names the old version first and does not call the store unpaired', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_VERSION: '0.21.0', FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date('2026-10-20T10:00:00Z') });
+    expect(r.status).toMatchObject({ wacli_version: '0.21.0', min_version_ok: false, authenticated: false });
+    expect(r.problems[0]).toBe('wacli 0.21.0 is older than the minimum 0.22.0. Fix: brew upgrade wacli');
+    expect(r.problems.some((p) => p.includes('not paired'))).toBe(false);
+    expect(formatDoctor(r)).toContain('below minimum');
+  });
+});
+
+describe('doctor with a corrupt policy', () => {
+  function setup() {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+    return { paths, runner };
+  }
+
+  it('lists the file and the error as a problem while the other checks still run', async () => {
+    const { paths, runner } = setup();
+    await mkdir(paths.configDir, { recursive: true });
+    await writeFile(paths.policyFile, '{"nope":1}');
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date('2026-10-20T10:00:00Z') });
+    expect(r.policy).toBeNull();
+    expect(r.status).toMatchObject({ wacli_version: '0.22.0', authenticated: true });
+    expect(r.problems).toHaveLength(1);
+    expect(r.problems[0]).toContain(paths.policyFile);
+    expect(r.problems[0]).toContain('is invalid');
+    const text = formatDoctor(r);
+    expect(text).toContain('Problems:');
+    expect(text).toContain('writes: unknown');
+    expect(text).toContain('paired: yes');
+  });
+
+  it('names the file when it is not valid JSON, and lists nothing about the allowlist', async () => {
+    const { paths, runner } = setup();
+    await mkdir(paths.configDir, { recursive: true });
+    await writeFile(paths.policyFile, 'not json');
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date() });
+    expect(r.problems).toEqual([`${paths.policyFile} is not valid JSON`]);
+    expect(formatDoctor(r)).not.toContain('Run whatsapp-agent doctor');
+  });
+
+  it('runs as a command with exit code 1, reads the account without loading deps, and creates no directories', async () => {
+    const { paths } = setup();
+    await mkdir(paths.configDir, { recursive: true });
+    await writeFile(paths.policyFile, '{"nope":1}');
+    vi.stubEnv('WHATSAPP_AGENT_CONFIG_DIR', paths.configDir);
+    vi.stubEnv('WHATSAPP_AGENT_DATA_DIR', paths.dataDir);
+    vi.stubEnv('WHATSAPP_AGENT_WACLI_BIN', FAKE_WACLI);
+    vi.stubEnv('FAKE_WACLI_FIXTURES', FIXTURES);
+    vi.stubEnv('FAKE_WACLI_STORE_DIR', path.join(tmp, 'store'));
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const before = process.exitCode;
+    try {
+      await doctorCommand({ service: () => null }).parseAsync(['--json'], { from: 'user' });
+      const report = JSON.parse(out.mock.calls.map((c) => String(c[0])).join('')) as { policy: unknown; problems: string[]; status: { authenticated: boolean } };
+      expect(report.policy).toBeNull();
+      expect(report.status.authenticated).toBe(true);
+      expect(report.problems[0]).toContain(paths.policyFile);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      out.mockRestore();
+      process.exitCode = before;
+    }
+    await expect(stat(paths.dataDir)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('doctor with an inert allowlist entry', () => {
+  it('names the policy remove command in the hint', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    await mkdir(paths.configDir, { recursive: true });
+    await writeFile(paths.policyFile, JSON.stringify({ ...DEFAULT_POLICY, writes: { ...DEFAULT_POLICY.writes, allow: ['Alice "A" $x', '+61 400 000 001'] } }));
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service: null, now: () => new Date() });
+    expect(r.problems).toEqual([
+      'Allowlist entry "Alice "A" $x" is not a phone number or JID and never matches. Remove it with: whatsapp-agent policy remove "Alice \\"A\\" \\$x", then add the person with: whatsapp-agent policy allow <number or JID>',
+    ]);
+  });
+});
+
+describe('doctor with a service that is installed but stopped', () => {
+  it('tells the person to restart it with daemon install', async () => {
+    const paths = resolvePaths({ WHATSAPP_AGENT_CONFIG_DIR: path.join(tmp, 'c'), WHATSAPP_AGENT_DATA_DIR: path.join(tmp, 'd') }, tmp);
+    const runner = createRunner({ bin: FAKE_WACLI, baseEnv: fakeEnv({ FAKE_WACLI_STORE_DIR: path.join(tmp, 'store') }) });
+    const service = { install: async () => '', uninstall: async () => {}, status: async () => ({ installed: true, running: false, detail: 'installed, inactive' }) };
+    const r = await collectDoctor({ runner, policyFile: paths.policyFile, paths, service, now: () => new Date() });
+    expect(r.problems).toEqual([]);
+    expect(r.warnings).toEqual(['The sync daemon is installed but not running. Restart it with: whatsapp-agent daemon install']);
+  });
+});

@@ -265,8 +265,7 @@ forward: allowlist the recipient and set `writes.confirm` to `unlisted`, or
 set it to `never`. The SDK's legacy shim serves pre-2026 clients that do
 support elicitation, so no separate code path is needed for them.
 
-No `requestState` is used in v1: a single round suffices and the client
-retries with identical arguments.
+A signed `requestState` binds each answer to its prompt (A27).
 
 ## 6. Policy
 
@@ -304,9 +303,9 @@ Field meanings:
 - `writes.confirm`: `always` prompts for every send and reaction;
   `unlisted` prompts unless the recipient matches `writes.allow`; `never`
   never prompts. `mark_read` never prompts.
-- `writes.allow`: entries are phone numbers (normalised to digits), JIDs, or
-  exact chat or contact names (case-insensitive). Matching is against the
-  resolved recipient.
+- `writes.allow`: entries are phone numbers (normalised to digits) or JIDs,
+  canonicalised on both sides and matched against the resolved recipient.
+  Name entries never match (see A18); `policy allow <name>` stores the JID.
 - `writes.groups`: when false, any write whose resolved kind is `group` is
   refused with `GroupsDisabled`.
 - `writes.rateLimit`: applies to `send_text`, `send_file` and `react`.
@@ -343,7 +342,8 @@ show a form, and the elicitation answer if this is a re-entry.
    `Deny(confirmation_unavailable)`.
 9. If needed and no accepted answer is present: `NeedsConfirmation`.
 10. If needed and the answer is declined, cancelled or unticked:
-    `Deny(confirmation_declined)`.
+    `Deny(confirmation_declined)`. A declined answer denies even when the
+    policy no longer needs a confirmation (A30).
 11. `Allow`.
 
 The function has no I/O. Rate-limit state and the client capability are
@@ -480,7 +480,7 @@ Directories are created 0700, files 0600.
 | `rate_limited` | window or gap exceeded | retry after N seconds |
 | `confirmation_unavailable` | host cannot show forms | allowlist or change confirm |
 | `confirmation_declined` | person said no | nothing was sent |
-| `ambiguous_recipient` | several matches | candidates list |
+| `ambiguous_recipient` | several matches | candidates list and `total`, the full number of matches before the cap of 10; the message says "Showing the first 10." when the list was cut |
 | `not_found` | chat, message or media missing | check id |
 | `timeout` | wacli exceeded its budget | retry; outcome of a send may be uncertain |
 | `wacli_error` | any other non-zero exit | exit code and stderr tail |
@@ -606,3 +606,133 @@ Package manager: pnpm. Node engines `>=20`.
 - Group administration, message edit and delete, polls, voice notes.
 - Multi-account policy in one file.
 - Windows service installation.
+
+## 16. Amendments made during planning (2026-10-20)
+
+Facts learnt from the wacli and MCP SDK sources while writing the plan. Each
+overrides the earlier text where they differ.
+
+- A1. Node engines are `>=22.12.0` (the floor commander 15 and vitest 5
+  require) and CI runs Node 22, 24 and 26. Node 20 reached end of life in
+  April 2026.
+- A2. No bundler. `tsc` emits ESM to `dist/`; `bin/whatsapp-agent.mjs` is a
+  shim that imports `dist/cli.js`. `tsdown` is dropped.
+- A3. `wacli version` prints plain text (for example `0.22.0`) and has no
+  `--json`. The version is parsed with a `\d+\.\d+\.\d+` match.
+- A4. wacli writes its JSON error envelope `{"success":false,"data":null,"error":"..."}`
+  to **stderr** and exits 1. Success envelopes `{"success":true,"data":...}`
+  go to stdout. The runner parses both streams accordingly.
+- A5. `groups info` requires a live connection and the store lock, so it
+  cannot run beside the daemon. `get_group` instead uses the local snapshot:
+  `groups list --query=<jid>` (matches name or JID) for owner, created time
+  and community links, plus `groups participants list --jid=<jid>`.
+  Description, announce-only and locked flags are not available locally and
+  are dropped from `get_group`. The daemon passes `--refresh-groups` and
+  `--refresh-contacts` so the snapshot is refreshed on every start.
+- A6. wacli chat kinds are `dm`, `group`, `newsletter`, `broadcast` and
+  `unknown`; the agent-facing kinds are `user`, `group`, `channel`,
+  `broadcast`, `unknown`.
+- A7. Message rows from wacli use Go field names without JSON tags:
+  `ChatJID`, `MsgID`, `SenderJID`, `SenderName`, `Timestamp`, `FromMe`,
+  `Text`, `DisplayText`, `quoted_msg_id`, `quoted_sender_jid`, `MediaType`,
+  `MediaCaption`, `Filename`, `MimeType`, `Edited`, `Revoked`. There is no
+  file size on a message row, so the agent-facing media object is
+  `{type, caption, filename, mime}` without `size`.
+- A8. Contact rows carry `jid`, `phone`, `name`, `alias`, `system_name`. The
+  agent-facing contact is `{jid, phone, name, alias, system_name}`; there is
+  no `push_name`.
+- A9. `download_media` passes a per-chat directory we own as `--output`;
+  wacli chooses the file name inside it. The path returned is still inside
+  the data directory.
+- A10. The policy is re-read from disk on every write tool call and on
+  `whatsapp_status`, so `policy enable` takes effect without restarting the
+  MCP server. Input schema limits are fixed at server start.
+- A11. Two error codes are added: `store_locked` (wacli reported the store
+  lock held by another process) and `invalid_input`.
+- A12. Model-sourced values are passed to wacli as `--flag=value`, and
+  positional queries are preceded by `--`, so text beginning with `-` is
+  never parsed as a flag.
+- A13. CI runs typecheck, tests and build; there is no separate linter in
+  v1.
+- A14. The daemon service installer accepts `WHATSAPP_AGENT_ALLOW_LOCAL_SERVICE=1`
+  to allow installing from a repository checkout during development.
+- A15. Name resolution: a single exact case-insensitive match wins; a lone
+  partial match wins only when the chat or contact name contains the input;
+  otherwise resolution falls through to contacts and then `not_found`, so a
+  digit fragment can never land on a JID substring match.
+- A16. User JIDs are canonicalised (a leading `+` and a `:device` suffix are
+  stripped). A phone-like input needs an optional single leading `+` and 6 to
+  15 digits; digits starting with 0 are refused as `invalid_input` with a
+  request for the international format, instead of building a JID.
+- A17. wacli encodes an empty list as `null`. Every list read goes through
+  `asList`, which treats anything that is not an array as empty.
+- A18. Write gate: only recipients of kind `user` or `group` can receive
+  writes; `channel`, `broadcast` (including `status@broadcast`) and `unknown`
+  are `unsupported_target`. Allowlist entries match by phone number or JID
+  only; name entries never match, because display names are chosen by other
+  people. `policy allow <name>` resolves the name once through the resolver
+  and stores the canonical JID; `policy show` flags entries that are neither
+  a phone number nor a JID as inert.
+- A19. Shapes as built: `whatsapp_status` returns flat fields
+  (`heartbeat_at`, `heartbeat_age_seconds`, `last_sync_at`, `store_dir`,
+  `connection_state`, `session_revoked`, `counts`, `policy`) rather than a
+  nested `daemon` object; `list_groups` rows have no `participant_count`;
+  `get_group` returns `participant_count` and `participants` from the local
+  snapshot only (see A5). Schema-validation failures raised by the MCP SDK are
+  plain-text error results, not the `{"error", "message"}` JSON shape.
+- A20. `download_media` inlines an image block only for `image/png`,
+  `image/jpeg`, `image/gif` and `image/webp`, only when the file's magic
+  bytes match the declared type, and only when the size is above 0 and at or
+  below `media.inlineImageMaxBytes`. The path and metadata are returned
+  regardless.
+- A21. The daemon log renders wacli's stderr through `describeStderrLine`:
+  a recognised event logs only its validated name, any other JSON-shaped
+  line becomes a placeholder with a length, and plain lines lose control
+  characters and are capped at 500 characters. `daemon run` exits 0 both on
+  `logged_out` and on a stop; the launchd template uses `KeepAlive` with
+  `SuccessfulExit: false` and the systemd unit `Restart=on-failure`, so a
+  revoked session is not relaunched by the service layer while supervisor
+  crashes still are. A stop request interrupts a backoff sleep.
+- A22. Name lookups request 50 rows from both `chats list --query` and
+  `contacts search`, so an exact match is not missed behind partial ones; the
+  `ambiguous_recipient` payload still carries at most 10 candidates. The payload
+  also carries `total`, the full number of matches before the cap of 10, and the
+  message says "Showing the first 10." when the list was cut.
+- A23. Write tools resolve names exactly: a name is accepted only on an exact
+  case-insensitive, trimmed, NFC-normalised match on a chat name or a contact's
+  name, alias or system name, and a lone partial match is `ambiguous_recipient`
+  with that candidate. Read tools keep the lone-partial rule of A15.
+- A24. Every write is preceded by an `attempted` audit row, appended before the
+  wacli call and followed by `sent` or `failed`; if that row cannot be appended
+  the send does not happen.
+- A25. The daemon logs the sanitised message of an `error` event and of a wacli
+  failure envelope (controls stripped, JIDs and runs of 8 or more digits
+  replaced, 200 characters at most); other recognised events stay name-only.
+- A26. `daemon.staleThreshold` is at most 2 minutes (seconds up to 120, or `1m`
+  or `2m`), and the validation message names the limit.
+- A27. Confirmation answers are bound to the request. The server mints a signed
+  `requestState` for every confirmation prompt with the MCP SDK's request-state
+  codec (a random per-process key, 300 second lifetime). Its payload names the
+  kind of write, the resolved JID, the chat kind, a random nonce and a SHA-256
+  digest of every field that affects the send. An answer counts as acceptance
+  only when the state verifies, its digest equals one recomputed from the
+  current call, and its nonce has not been used before; anything else is no
+  answer and the person is asked again. A state the SDK cannot verify, or one
+  that has expired, is refused before the handler runs and nothing is sent. On
+  the 2025 protocol the prompt is an elicitation answered in process and no
+  state travels.
+- A28. A failure after the write has been handed to wacli is reported as
+  SEND_UNCERTAIN with `outcome_uncertain` true, and the audit row carries
+  `uncertain` true with the reason suffixed "(outcome uncertain, may have been
+  delivered)". Errors raised before the spawn or by wacli's flag parsing, and
+  wacli's own definite verdicts (not paired, store locked, not found, too old),
+  are reported as they are, because nothing was sent. A `sent` row that cannot
+  be written is logged and the send is still reported as sent; the `attempted`
+  row (A24) stays fail-closed.
+- A29. The MCP server serves both protocol eras through the SDK's `serveStdio`.
+  On SIGINT, SIGTERM or SIGHUP it closes the transport and waits for writes in
+  flight (from the policy gate to the audit append) within one 10 second budget,
+  then exits 0; a second signal exits 130.
+- A30. A declined confirmation denies the write even when the policy no longer
+  calls for a prompt (confirm set to never, or the recipient allowlisted since
+  the prompt). A decline never sends.
